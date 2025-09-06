@@ -1,0 +1,571 @@
+<!-- ready for terser+roadroller -->
+<!doctype html><meta charset=utf-8><title>Raymarch Corridor</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#000}canvas{display:block;width:100vw;height:100vh; image-rendering: pixelated;}</style>
+<canvas id=c></canvas>
+<!-- crosshair -->
+<div id="xh" style="position:fixed;left:50%;top:50%;width:24px;height:24px;margin:-12px 0 0 -12px;pointer-events:none;"><div style="position:absolute;left:11px;top:0;width:2px;height:24px;background:#fff;opacity:.7"></div><div style="position:absolute;left:0;top:11px;width:24px;height:2px;background:#fff;opacity:.7"></div></div>
+<div id="hud" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;font:700 40px/1.2 system-ui, sans-serif;color:#f33;text-shadow:0 0 8px #000;letter-spacing:2px;"></div>
+<script>
+const canvas=c, gl=canvas.getContext('webgl2',{antialias:false,depth:false,stencil:false});
+
+let W=0,H=0, DPR= Math.min(1,devicePixelRatio||1);
+// фіксований внутрішній рендер
+const FIXED_RES=true, RENDER_W=320, RENDER_H=240;
+function resize(){
+  if(FIXED_RES){
+    W=canvas.width=RENDER_W; H=canvas.height=RENDER_H;
+    const s=Math.min(innerWidth/RENDER_W, innerHeight/RENDER_H);
+    canvas.style.width = (RENDER_W*s)+'px';
+    canvas.style.height= (RENDER_H*s)+'px';
+    canvas.style.marginLeft=((innerWidth - RENDER_W*s)/2)+'px';
+    canvas.style.marginTop =((innerHeight - RENDER_H*s)/2)+'px';
+    canvas.style.position='absolute';
+    canvas.style.left=canvas.style.top='0';
+  }else{
+    DPR=Math.min(1,devicePixelRatio||1);
+    W=canvas.width = innerWidth*DPR;
+    H=canvas.height= innerHeight*DPR;
+    canvas.style.width='100vw';
+    canvas.style.height='100vh';
+    canvas.style.margin='0';
+    canvas.style.position='';
+  }
+  gl.viewport(0,0,W,H);
+}
+addEventListener('resize',resize);resize();
+
+// --- minimal "zzfx" style inline shot sound ---
+const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
+function sfx(f=1200,len=0.08,vol=0.2,type='square'){let o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=vol;let t=ac.currentTime;o.start(t);g.gain.exponentialRampToValueAtTime(0.0001,t+len);o.stop(t+len)}
+// --- ASCII LEVEL (центруємо в світі) ---
+const TILE=2.0;
+const LEVEL=[
+  "d***ooooooo***p",
+  "****o==+==o****",
+  "S+++S++S++S+++k",
+  "*===S==S==S===k",
+  "***ook=+=k*****",
+  "******===o*****",
+  "*****od==o*****",
+  "*****ooooo*****"
+];
+// Символи, які трактуємо як “стіни”
+const WALL_SET = new Set(['o','X','#']);
+
+function parseLevel(level){
+  const rows=level.length, cols=level[0].length;
+  // центр карти в нуль
+  const cx=(cols-1)/2, cz=(rows-1)/2;
+  const toWorld=(col,row)=>[ (col-cx)*TILE, -0.4, -(row-cz)*TILE ];
+  let playerStart=[0,0,0], catSpawns=[], sphereSpawns=[], doors=[];
+  // збираємо також тайли — на майбутній рендер стін/кімнат
+  const tiles=[];
+  for(let r=0;r<rows;r++){
+    const line=level[r];
+    for(let c=0;c<cols;c++){
+      const ch=line[c];
+      const [x,y,z]=toWorld(c,r);
+      if(ch==='p') playerStart=[x,0,z];
+      if(ch==='C'||ch==='c'||ch==='K'||ch==='k') catSpawns.push([x,y,z]);
+      if(ch==='S') sphereSpawns.push([x,y,z]);
+      if(ch==='d'||ch==='D') doors.push([x,y,z]);
+      // збережемо тайл для наступного кроку (геометрія)
+      tiles.push({ch,x,y,z});
+    }
+  }
+  return {playerStart,catSpawns,sphereSpawns,doors,tiles,rows,cols,center:[cx,cz]};
+}
+const LV = parseLevel(LEVEL);
+console.log('LEVEL parsed:', LV);
+ 
+// --- TILE TEXTURE (R8): 0=empty, 1=wall(o/X/#) ---
+function buildTileTexture(level){
+  const rows=level.length, cols=level[0].length;
+  const data=new Uint8Array(cols*rows);
+  for(let r=0;r<rows;r++){
+    const line=level[r];
+    for(let c=0;c<cols;c++){
+      const ch=line[c];
+      const i=r*cols+c;
+      data[i]= (ch==='o'||ch==='X'||ch==='#') ? 1 : 0;
+    }
+  }
+  const tex=gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0); // WebGL2: гарантуємо, що рядки йдуть щільно
+  // міні-діагностика
+  console.assert(data.byteLength === cols*rows, 'tile data size mismatch', {cols, rows, len:data.byteLength});
+  // WebGL2: R8 texture
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.R8,cols,rows,0,gl.RED,gl.UNSIGNED_BYTE,data);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+  return {tex, cols, rows};
+}
+const TILE_TEX = buildTileTexture(LEVEL);
+
+// ---- Мульти-списки з карти ----
+const MAX_CATS=8, MAX_SPHERES=8, MAX_DOORS=4;
+// коти
+const cats = LV.catSpawns.slice(0, MAX_CATS).map(([x,y,z])=>({
+  pos:[x,y,z],
+  eyes:0,
+  attacking:false,
+  whiteUntil:0,
+  spawn:[x,y,z]
+}));
+// сфери (реактивні, зникають на кілька секунд при пострілі)
+const spheres = LV.sphereSpawns.slice(0, MAX_SPHERES).map(([x,y,z])=>({
+  pos:[x, -0.2, z],
+  R:0.3,
+  downUntil:0
+}));
+// двері (портали) — просто тонкий світний бокс
+const doors = LV.doors.slice(0, MAX_DOORS).map(([x,y,z])=>({
+  pos:[x, 0.0, z],
+  half:[0.08, 0.6, 0.6]
+}));
+
+// --- shaders ---
+const vs=`#version 300 es
+void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.-1.,0,1);}
+`;
+const fs=`#version 300 es
+precision highp float;out vec4 o;
+uniform vec2 uRes;uniform float uTime;uniform vec3 uCam,uF,uR,uU;uniform float uEnemy;
+
+// tile texture (walls)
+uniform sampler2D uTileTex;
+uniform ivec2 uTileSize;     // (cols, rows)
+uniform vec2  uTileCenter;   // (cx, cz) як у parseLevel
+uniform float uTileScale;    // TILE (розмір тайла)
+// multi-cats
+const int MAX_CATS = 8;
+uniform int uCatCount;
+uniform vec4 uCatsPos[MAX_CATS];   // xyz=pos
+uniform float uCatsState[MAX_CATS]; // 1.0=black, 2.0=white, 0=hidden
+uniform float uCatsEyes[MAX_CATS];  // 0..1
+// ---------------- pack/unpack cat id in material value ----------------
+// Кодуємо індекс у вигляді 3.00, 3.01, 3.02, ... (крок 0.01)
+float packCatId(int i){ return 3.0 + float(i)*0.01; }
+int unpackCatId(float m){
+  // Перетворюємо назад: (m-3.0)*100 ≈ i, з округленням до найближчого
+  int id = int(floor((m - 3.0)*100.0 + 0.5));
+  // безпечно обмежуємо
+  if(id < 0) id = 0;
+  if(id >= MAX_CATS) id = MAX_CATS-1;
+  return id;
+}
+// spheres
+const int MAX_SPHERES = 8;
+uniform int uSphereCount;
+uniform vec4 uSpheresPos[MAX_SPHERES]; // xyz=pos, w=radius
+uniform float uSpheresActive[MAX_SPHERES]; // 1 active, 0 hidden
+// doors
+const int MAX_DOORS = 4;
+uniform int uDoorCount;
+uniform vec4 uDoorsPos[MAX_DOORS];  // xyz=center
+uniform vec4 uDoorsHalf[MAX_DOORS]; // xyz=half-size
+
+float sdSphere(vec3 p,float r){return length(p)-r;}
+float sdRect(vec2 p,vec2 b){vec2 d=abs(p)-b;return min(max(d.x,d.y),0.)+length(max(d,0.));}
+
+// === helpers (ГЛОБАЛЬНО, не всередині map!) ===
+float sdCapsule(vec3 q, vec3 a, vec3 b, float r){
+  vec3 pa=q-a, ba=b-a;
+  float h=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
+  return length(pa-ba*h)-r;
+}
+float sdEllipsoid(vec3 q, vec3 s){
+  return (length(q/s)-1.0)*min(min(s.x,s.y),s.z);
+}
+float sdBox(vec3 p, vec3 b){
+  vec3 d=abs(p)-b;
+  return min(max(d.x,max(d.y,d.z)),0.) + length(max(d,0.));
+}
+// дві площини y=±h (поверхні, НЕ заповнений шар)
+float sdTwoPlanesY(vec3 p, float h){
+  return min(abs(p.y - h), abs(p.y + h));
+}
+float sdCatModelAt(vec3 q, vec3 catPos){
+  q -= catPos;
+  float d = 1e9;
+  d = min(d, sdEllipsoid(q*vec3(1.0,1.1,1.0), vec3(0.45,0.28,0.75)));   // torso
+  d = min(d, sdSphere(q-vec3(0.35,0.05,0.15), 0.18));                   // head
+  d = min(d, sdEllipsoid((q-vec3(0.46,0.18,0.22))*vec3(1.3,1.0,1.3), vec3(0.06,0.09,0.06))); // ear
+  d = min(d, sdEllipsoid((q-vec3(0.30,0.19,0.05))*vec3(1.3,1.0,1.3), vec3(0.06,0.09,0.06))); // ear
+  d = min(d, sdCapsule(q, vec3(-0.20,-0.20, 0.25), vec3(-0.20,-0.45, 0.25), 0.05));          // legs
+  d = min(d, sdCapsule(q, vec3(-0.05,-0.20, 0.25), vec3(-0.05,-0.45, 0.25), 0.05));
+  d = min(d, sdCapsule(q, vec3(-0.25,-0.20,-0.25), vec3(-0.25,-0.45,-0.25), 0.05));
+  d = min(d, sdCapsule(q, vec3(-0.10,-0.20,-0.25), vec3(-0.10,-0.45,-0.25), 0.05));
+  d = min(d, sdCapsule(q, vec3(-0.55,-0.05,-0.50), vec3(-0.85, 0.10,-0.70), 0.04));          // tail
+  return d;
+}
+
+// return (dist,matId)
+vec2 map(vec3 p){
+  float d=1e9, m=0.;
+  // підлога/стеля (мат 4) — відстань до найближчої площини
+  float dFloor = sdTwoPlanesY(p, 0.6);
+  if(dFloor<d){ d=dFloor; m=4.; }
+  // стіни/колони з TILE TEXTURE — 3×3 локальне оточення (мат 1)
+  // обчислюємо індекс поточного тайла з p.xz (інверс до parseLevel)
+  int ix = int(floor(p.x / uTileScale + uTileCenter.x + 0.5));
+  int iz = int(floor(-p.z / uTileScale + uTileCenter.y + 0.5));
+  for(int dz=-1; dz<=1; dz++){
+    for(int dx=-1; dx<=1; dx++){
+      int tx = ix + dx;
+      int tz = iz + dz;
+      if(tx<0 || tz<0 || tx>=uTileSize.x || tz>=uTileSize.y) continue;
+      // семпл з текстури (0..255)
+      float code = texture(uTileTex, (vec2(tx, tz)+0.5)/vec2(uTileSize)).r * 255.0;
+      if(code < 0.5) continue; // порожньо
+      // центр тайла в світі (як у parseLevel: (col-cx)*TILE, z=-(row-cz)*TILE)
+      vec3 c = vec3( (float(tx)-uTileCenter.x)*uTileScale, 0.0, -(float(tz)-uTileCenter.y)*uTileScale );
+      vec3 b = vec3(uTileScale*0.48, 0.6, uTileScale*0.48);
+      // швидка груба відсічка
+      vec3 d3 = abs(p - c) - b;
+      float rough = max(max(d3.x,d3.y), d3.z);
+      if(rough > d) continue;
+      float db = sdBox(p - c, b);
+      if(db < d){ d=db; m=1.; }
+    }
+  }  
+  // сфери з карти (мат 2)
+  for(int i=0;i<MAX_SPHERES;i++){
+    if(i>=uSphereCount) break;
+    if(uSpheresActive[i] < 0.5) continue;
+    vec3 sp = uSpheresPos[i].xyz;
+    float rr = uSpheresPos[i].w;
+    float ds = sdSphere(p - sp, rr);
+    if(ds < d){ d=ds; m=2.; }
+  }
+  // кіт (мат 3.xx, де xx — індекс*0.01) — масив
+  for(int i=0;i<MAX_CATS;i++){
+    if(i>=uCatCount) break;
+    if(uCatsState[i] < 0.5) continue; // hidden
+    vec3 cp = uCatsPos[i].xyz;
+    float dc = sdCatModelAt(p, cp);
+    if(dc < d){ d=dc; m=packCatId(i); }
+  }
+  // двері (мат 5) — світний тонкий бокс
+  for(int i=0;i<MAX_DOORS;i++){
+    if(i>=uDoorCount) break;
+    vec3 dp = uDoorsPos[i].xyz;
+    vec3 dh = uDoorsHalf[i].xyz;
+    float dd = sdBox(p - dp, dh);
+    if(dd < d){ d=dd; m=5.; }
+  }
+  return vec2(d,m);
+}
+vec2 march(vec3 ro,vec3 rd){
+  float t = 0.0;
+  float m = 0.0;
+  // Менше кроків (швидше), але з розумним раннім виходом
+  for (int i=0; i<128; i++) {
+    vec2 h = map(ro + rd*t);
+    // dynamic epsilon: далі = грубіше, ближче = точніше
+    float eps = mix(0.001, 0.015, clamp((t - 5.0)/20.0, 0.0, 1.0));
+    if (h.x < eps) { m = h.y; break; }
+    t += h.x;
+    // межа сцени
+    if (t > 40.0) { m = 0.0; break; }
+    // fog early-out: якщо туман майже все з’їв — зупиняємось
+    if (exp(-0.07 * t) < 0.02) { m = 0.0; break; }
+  }
+  return vec2(t, m);
+}
+vec3 nrm(vec3 p){
+  float e=0.001;
+  vec2 k=vec2(1,-1);
+  return normalize(
+    k.xyy*map(p+k.xyy*e).x+
+    k.yyx*map(p+k.yyx*e).x+
+    k.yxy*map(p+k.yxy*e).x+
+    k.xxx*map(p+k.xxx*e).x);
+}
+void main(){
+  vec2 uv=(gl_FragCoord.xy-0.5*uRes)/uRes.y;
+  vec3 rd=normalize(uv.x*uR+uv.y*uU+uF);
+  vec2 h=march(uCam,rd); float t=h.x, mat=h.y;
+  vec3 bg=vec3(0.02,0.02,0.04);
+  // Якщо вийшли по туману/межі — не рахуємо нормалі (економія)
+  if (t>40. || mat<0.5) { o=vec4(bg,1.0); return; }
+  vec3 p=uCam+rd*t;
+  // для підлоги/стелі нормаль відома — економимо 4 map-виклики
+  vec3 n = (mat>3.5 && mat<4.5) ? vec3(0.0, (p.y>0.0)?1.0:-1.0, 0.0) : nrm(p);
+  // materials (1=wall, 2=sphere, 3.xx=cat(index), 4=floor/ceiling, 5=door)
+  vec3 col;
+  // обчислимо id кота, якщо потрапили саме по коту
+  int ciHit = -1;
+  if(mat >= 3.0 && mat < 4.0) ciHit = unpackCatId(mat);
+  if(mat < 1.5){
+    // стіни: трохи шумної градації
+    col = mix(vec3(0.10), vec3(0.18,0.19,0.22), 0.5 + 0.5*sin((p.x+p.z)*2.0));
+  } else if(mat < 2.5){
+    // сфера-декор
+    col = vec3(0.1,0.02,0.02) + 0.3*vec3(0.8,0.1,0.1);
+  } else if(mat < 4.0){
+    // кіт: беремо стан саме того кота, в якого влучили
+    float state = (ciHit>=0 && ciHit<uCatCount) ? uCatsState[ciHit] : 1.0; // 1=black, 2=white
+    if(state < 1.5){
+      col = vec3(0.02,0.02,0.03); // black
+    } else {
+      col = vec3(0.85);           // white
+    }
+  } else if(mat < 4.5){
+    // підлога/стеля (інший відтінок)
+    col = mix(vec3(0.10), vec3(0.18,0.19,0.20), 0.5 + 0.5*sin(p.x*2.0));
+  } else if(mat < 5.5){
+    // двері/портал — світний матеріал
+    col = vec3(0.2,0.25,0.8);    
+  } else {
+    // бекграунд fallback (не має траплятись, але на всяк випадок)
+    col = vec3(0.1);
+  }
+  vec3 l=normalize(vec3(0.4,0.6,0.7));
+  float diff=max(0.05,dot(n,l));
+  col*=diff + (mat>2.5 ? 0.3 : 0.3);
+  // Eyes glow (emission) — тільки для того кота, якого ми рендеримо
+  if(ciHit >= 0 && ciHit < uCatCount){
+    float eyes = uCatsEyes[ciHit];
+    if(eyes > 0.0){
+      vec3 pr = p - uCatsPos[ciHit].xyz;
+      float eyeL = length(pr - vec3(0.32,0.08,0.24));
+      float eyeR = length(pr - vec3(0.40,0.08,0.18));
+      float dEye = min(eyeL, eyeR);
+      float glow = eyes * smoothstep(0.14, 0.03, dEye);
+      col += glow * vec3(3.0, 0.6, 0.2);
+    }
+  }
+  float fog=exp(-0.07*t);
+  o=vec4(mix(bg,col,fog),1);
+}
+`;
+// --- GL program ---
+function shader(t,src){
+  const s=gl.createShader(t);
+  gl.shaderSource(s,src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){
+    console.error('SHADER COMPILE ERROR:', gl.getShaderInfoLog(s), '\n--- SOURCE ---\n'+src);
+  }
+  return s;
+}
+
+const pr=gl.createProgram(), vao=gl.createVertexArray();
+gl.attachShader(pr,shader(gl.VERTEX_SHADER,vs));
+gl.attachShader(pr,shader(gl.FRAGMENT_SHADER,fs));
+gl.linkProgram(pr);gl.useProgram(pr);gl.bindVertexArray(vao);
+if(!gl.getProgramParameter(pr,gl.LINK_STATUS)){
+  console.error('PROGRAM LINK ERROR:', gl.getProgramInfoLog(pr));
+}
+const uRes=gl.getUniformLocation(pr,'uRes'),
+      uTime=gl.getUniformLocation(pr,'uTime'),
+      uCam =gl.getUniformLocation(pr,'uCam'),
+      uF   =gl.getUniformLocation(pr,'uF'),
+      uR   =gl.getUniformLocation(pr,'uR'),
+      uU   =gl.getUniformLocation(pr,'uU'),
+      uEnemy=gl.getUniformLocation(pr,'uEnemy'),
+      // tile texture
+      uTileTex   = gl.getUniformLocation(pr,'uTileTex'),
+      uTileSize  = gl.getUniformLocation(pr,'uTileSize'),
+      uTileCenter= gl.getUniformLocation(pr,'uTileCenter'),
+      uTileScale = gl.getUniformLocation(pr,'uTileScale'),
+      // multi-cats
+      uCatCount= gl.getUniformLocation(pr,'uCatCount'),
+      uCatsPos = gl.getUniformLocation(pr,'uCatsPos[0]'),
+      uCatsState = gl.getUniformLocation(pr,'uCatsState[0]'),
+      uCatsEyes  = gl.getUniformLocation(pr,'uCatsEyes[0]'),
+      // spheres
+      uSphereCount = gl.getUniformLocation(pr,'uSphereCount'),
+      uSpheresPos  = gl.getUniformLocation(pr,'uSpheresPos[0]'),
+      uSpheresActive = gl.getUniformLocation(pr,'uSpheresActive[0]'),
+      // doors
+      uDoorCount = gl.getUniformLocation(pr,'uDoorCount'),
+      uDoorsPos  = gl.getUniformLocation(pr,'uDoorsPos[0]'),
+      uDoorsHalf = gl.getUniformLocation(pr,'uDoorsHalf[0]');  
+
+// --- input & camera ---
+let keys={}, yaw=0, pitch=0, pos=[0,0,0], frames=0, startT=performance.now(), enemyDownUntil=0;
+// --- HUD ---
+const hud=document.getElementById('hud');
+let hudUntil=0, hudMsg='';
+// геймплейні константи
+const HUD_MS=2500, CAT_ALERT_RADIUS=3.5, CAT_EYES_DELAY_MS=1500, CAT_CHARGE=3.0, CAT_WALK=0.4;
+const CAT_SAFE_MS=7000; // скільки кіт «білий» після попадання
+function onKey(e){if(['KeyW','KeyA','KeyS','KeyD'].includes(e.code)){keys[e.code]=e.type==='keydown';e.preventDefault()}}
+document.addEventListener('keydown',onKey);document.addEventListener('keyup',onKey);
+canvas.addEventListener('click',()=>{canvas.requestPointerLock?.()},{passive:true});
+document.addEventListener('pointerlockchange',()=>{},false);
+document.addEventListener('mousemove',e=>{
+  if(document.pointerLockElement===canvas){yaw+=e.movementX*0.002;pitch-=e.movementY*0.002;pitch=Math.max(-1.5,Math.min(1.5,pitch));}
+});
+canvas.addEventListener('mousedown',e=>{
+  if(e.button===0){ // shoot
+    sfx(1200,0.08,0.22,'square'); // постріл
+    const now=performance.now();
+    const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
+    const F=[sy*cp, sp, -cy*cp], U=[-sy*sp, cp, cy*sp], Rv=[cy,0,sy];
+    const O=pos, D=F;
+    // --- hitscan по СФЕРАХ (усі активні)
+    for (let i=0;i<spheres.length;i++){
+      const s=spheres[i]; if(now < s.downUntil) continue;
+      const C=s.pos, R=s.R;
+      const OC=[O[0]-C[0],O[1]-C[1],O[2]-C[2]];
+      const t = -(OC[0]*D[0]+OC[1]*D[1]+OC[2]*D[2]);
+      if(t>0){
+        const qx=OC[0]+t*D[0], qy=OC[1]+t*D[1], qz=OC[2]+t*D[2];
+        if(Math.hypot(qx,qy,qz)<=R+0.02){ s.downUntil=now+2000; }
+      }
+    }
+    // --- hitscan по КОТАХ (спрощено — по голові як по сфері)
+    for (let i=0;i<cats.length;i++){
+      const c=cats[i];
+      const CC=[c.pos[0]+0.2, c.pos[1]+0.1, c.pos[2]+0.1], RR=0.6;
+      const OC=[pos[0]-CC[0],pos[1]-CC[1],pos[2]-CC[2]];
+      const tHit = -(OC[0]*D[0]+OC[1]*D[1]+OC[2]*D[2]);
+      if(tHit>0){
+        const qx=OC[0]+tHit*D[0], qy=OC[1]+tHit*D[1], qz=OC[2]+tHit*D[2];
+        if(Math.hypot(qx,qy,qz)<=RR+0.02){
+          hudMsg='BLACK CAT HIT'; hudUntil=now+HUD_MS; sfx(1800,0.10,0.25,'sawtooth');
+          c.whiteUntil = now + CAT_SAFE_MS;
+          c.attacking=false; c.eyes=0; c.pos = c.spawn.slice();
+        }
+      }
+    } 
+  }
+});
+
+// --- loop ---
+function vec3(x,y,z){return new Float32Array([x,y,z])}
+function frame(t){
+  frames++; let dt=(t-(frame.t||t))/1000;frame.t=t;
+  // movement
+  const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const F=[sy*cp, sp, -cy*cp], U=[-sy*sp, cp, cy*sp], Rv=[cy,0,sy];
+  const speed=3.0*dt;
+  if(keys.KeyW){pos[0]+=F[0]*speed;pos[1]+=F[1]*speed;pos[2]+=F[2]*speed}
+  if(keys.KeyS){pos[0]-=F[0]*speed;pos[1]-=F[1]*speed;pos[2]-=F[2]*speed}
+  if(keys.KeyA){pos[0]-=Rv[0]*speed;pos[2]-=Rv[2]*speed}
+  if(keys.KeyD){pos[0]+=Rv[0]*speed;pos[2]+=Rv[2]*speed}
+  pos[1]=0.0; // lock Y
+  // --- CATS behavior (кожен) ---
+  const now=performance.now();
+  // якщо гра тільки стартує — взяти позиції зі сцени
+  if(frames===1){
+    // старт гравця
+    if(LV.playerStart){ pos=[LV.playerStart[0], 0, LV.playerStart[2]]; }
+    // інакше коти вже взяті з карти в масиві cats[]
+    // TODO: spheres/doors використаємо наступним кроком
+  }
+  
+  // кожного кота оновлюємо однаково (простий AI)
+  for (let i=0;i<cats.length;i++){
+    const c=cats[i];
+    const isWhite = now < c.whiteUntil;
+    const dx=pos[0]-c.pos[0], dy=pos[1]-c.pos[1], dz=pos[2]-c.pos[2];
+    const dist=Math.hypot(dx,dy,dz);
+    if(isWhite){
+      c.attacking=false; c.eyes=0;
+      c.pos[2] -= CAT_WALK * dt;
+      if(c.pos[2] < c.spawn[2]-4.0) c.pos[2] = c.spawn[2]-4.0;
+    } else if(!c.attacking){
+      if(dist < CAT_ALERT_RADIUS){
+        // розігрів очей
+        c.eyes = Math.min(1, (c.eyes + dt* (1.0/CAT_EYES_DELAY_MS*1000.0)));
+        if(c.eyes>=1.0) c.attacking=true;
+      }else{
+        c.eyes = 0.0;
+        c.pos[2]+=CAT_WALK*dt;
+        if(c.pos[2] > c.spawn[2]+1.5) c.pos[2] = c.spawn[2]+1.5;
+      }
+    } else {
+      const inv=1/Math.max(1e-5,dist);
+      const vx=dx*inv, vy=dy*inv, vz=dz*inv;
+      c.pos[0]+=vx*CAT_CHARGE*dt; c.pos[1]+=vy*CAT_CHARGE*dt; c.pos[2]+=vz*CAT_CHARGE*dt;
+      c.eyes=1.0;
+      if(dist<0.6){
+        hudMsg='BLACK CAT ATTACKED YOU'; hudUntil=now+HUD_MS; sfx(220,0.12,0.3,'square');
+        c.pos = c.spawn.slice(); c.attacking=false; c.eyes=0;
+      }
+    }
+  }
+  // HUD оновлення
+  hud.textContent = (now<hudUntil)?hudMsg:'';
+  // uniforms & draw
+  gl.uniform2f(uRes,W,H);
+  gl.uniform1f(uTime,(t-startT)/1000);
+  gl.uniform3fv(uCam,vec3(pos[0],pos[1],pos[2]));
+  gl.uniform3fv(uF,vec3(F[0],F[1],F[2]));
+  gl.uniform3fv(uR,vec3(Rv[0],Rv[1],Rv[2]));
+  gl.uniform3fv(uU,vec3(U[0],U[1],U[2]));
+  gl.uniform1f(uEnemy, performance.now()<enemyDownUntil?0.0:1.0);
+  // --- push cats ---
+  {
+    const catCount = cats.length|0;
+    const posArr = new Float32Array(MAX_CATS*4);
+    const stateArr = new Float32Array(MAX_CATS);
+    const eyesArr = new Float32Array(MAX_CATS);
+    for(let i=0;i<Math.min(catCount,MAX_CATS);i++){
+      const c=cats[i];
+      posArr[i*4+0]=c.pos[0]; posArr[i*4+1]=c.pos[1]; posArr[i*4+2]=c.pos[2];
+      stateArr[i]=(performance.now()<c.whiteUntil)?2.0:1.0;
+      eyesArr[i]=c.eyes;
+    }
+    gl.uniform1i(uCatCount, Math.min(catCount,MAX_CATS));
+    gl.uniform4fv(uCatsPos, posArr);
+    gl.uniform1fv(uCatsState, stateArr);
+    gl.uniform1fv(uCatsEyes, eyesArr);
+  }
+  // --- push spheres ---
+  {
+    const n=spheres.length|0;
+    const posArr=new Float32Array(MAX_SPHERES*4);
+    const actArr=new Float32Array(MAX_SPHERES);
+    const now=performance.now();
+    for(let i=0;i<Math.min(n,MAX_SPHERES);i++){
+      const s=spheres[i];
+      posArr[i*4+0]=s.pos[0]; posArr[i*4+1]=s.pos[1]; posArr[i*4+2]=s.pos[2]; posArr[i*4+3]=s.R;
+      actArr[i]=(now<s.downUntil)?0.0:1.0;
+    }
+    gl.uniform1i(uSphereCount, Math.min(n,MAX_SPHERES));
+    gl.uniform4fv(uSpheresPos, posArr);
+    gl.uniform1fv(uSpheresActive, actArr);
+  }
+  // --- push doors ---
+  {
+    const n=doors.length|0;
+    const posArr=new Float32Array(MAX_DOORS*4);
+    const halfArr=new Float32Array(MAX_DOORS*4);
+    for(let i=0;i<Math.min(n,MAX_DOORS);i++){
+      const d=doors[i];
+      posArr[i*4+0]=d.pos[0]; posArr[i*4+1]=d.pos[1]; posArr[i*4+2]=d.pos[2];
+      halfArr[i*4+0]=d.half[0]; halfArr[i*4+1]=d.half[1]; halfArr[i*4+2]=d.half[2];
+    }
+    gl.uniform1i(uDoorCount, Math.min(n,MAX_DOORS));
+    gl.uniform4fv(uDoorsPos, posArr);
+    gl.uniform4fv(uDoorsHalf, halfArr);
+  }
+  // level boxes (статичні — можна сетити кожен кадр; дешеві)
+  // tile texture (одноразово можна, але ставимо тут для простоти)
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, TILE_TEX.tex);
+  gl.uniform1i(uTileTex, 0);
+  gl.uniform2i(uTileSize, TILE_TEX.cols, TILE_TEX.rows);
+  gl.uniform2f(uTileCenter, LV.center[0], LV.center[1]);
+  gl.uniform1f(uTileScale, TILE);
+  gl.drawArrays(gl.TRIANGLES,0,3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// --- smoke tests ---
+console.assert(canvas && gl instanceof WebGL2RenderingContext,'canvas exists');
+console.assert('requestPointerLock'in canvas && ('exitPointerLock'in document),'pointer lock path');
+(function(){let K=keys;onKey({code:'KeyW',type:'keydown',preventDefault:()=>{}});console.assert(K.KeyW===true,'input update');onKey({code:'KeyW',type:'keyup',preventDefault:()=>{}})})();
+console.assert(gl.getProgramParameter(pr,gl.LINK_STATUS),'shader compile success');
+setTimeout(()=>console.assert(frames>0,'frame counter > 0 after 1s'),1100);
+</script>
