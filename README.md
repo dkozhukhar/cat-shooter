@@ -1,4 +1,5 @@
 **Cat Shooter: Ritual Catacombs**
+
 A tiny 3D horror-shooter in cursed catacombs.
 Collect glowing shards, open runic doors, survive the ritual of nine lives.
 Beware — don’t stare too long into the eyes.
