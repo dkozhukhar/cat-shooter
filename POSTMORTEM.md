@@ -1,10 +1,12 @@
-# Making of: How my 2025 js13k game Cat Shooter Ritual Catacombs was born
+# Making of: Short and polished notes on how my 2025 js13k game Cat Shooter Ritual Catacombs was born
 
 ![Preview 800x500](https://github.com/dkozhukhar/cat-shooter/blob/main/preview_img/preview_800x500_200kb.png)
 
 ## Concept and Idea
 
 This year I experimented heavily with agentic workflows, and recalling my earlier participation in the contest, I ran many tests on how AI could handle creating games. When the jam began, I couldn’t resist trying again. Later in those experiments I stumbled into the idea of a 3D shooter with cats — black cats to scare players, white cats to confuse them (friendly at first, then turning hostile, or transforming into ghosts). The very first prototype was simply an infinite corridor with a ball, but once cats entered the picture the theme clicked. The naming was a patchwork: *Catacombs* came from that corridor feeling, *Ritual* appeared when I needed a phrase for player death (“ritual failed”), and *Cat Shooter* was just the quick label I gave the GitHub repository for my first draft. Together they stuck as Cat Shooter Ritual Catacombs.
+
+*Gameplay Video*
 
 [![Gameplay video](https://img.youtube.com/vi/VKJWRrND6bM/0.jpg)](https://www.youtube.com/watch?v=VKJWRrND6bM)
 
