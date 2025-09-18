@@ -85,3 +85,7 @@ This year I experimented heavily with agentic workflows, and recalling my earlie
 ## Closing
 
 The whole process took about one month of free time (\~20–40 hours). The result: a short 3D shooter with atmosphere, cats, and a boss fight. Imperfect, but complete. For me, the big success was not the game length, but the learning curve — GL, shaders, a touch of AI, and pipelines.
+
+---
+
+**P.S.** Every level has hidden transitions behind false walls, originally made just to test level switching but left in place. Some levels also contain secret spots. In the final room there is one more hidden passage, leading to an alternate ending. At one point I thought of putting extra levels there, but decided it would be too unclear for this jam.
