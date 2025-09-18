@@ -26,3 +26,17 @@ Beware — don’t stare too long into the eyes.
 * **Hearts (cyan)** – restore your health.
 * **Orbs (magenta)** – hostile projectiles, avoid or shoot.
 * **Runic Doors** – sealed until enough shards are gathered.
+
+---
+
+### Media
+
+## Gameplay video
+ [![Gameplay video](https://img.youtube.com/vi/VKJWRrND6bM/0.jpg)](https://www.youtube.com/watch?v=VKJWRrND6bM)
+
+## Preview images
+ ![Preview 800x500](https://github.com/dkozhukhar/cat-shooter/blob/main/preview_img/preview_800x500_200kb.png)
+ ![Preview 320x320](https://github.com/dkozhukhar/cat-shooter/blob/main/preview_img/preview_320x320_50kb.png)
+
+### Links
+* [Making of: How my 2025 js13k game Cat Shooter Ritual Catacombs was born](https://github.com/dkozhukhar/cat-shooter/blob/main/POSTMORTEM.md)  
