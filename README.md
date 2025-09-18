@@ -39,4 +39,4 @@ Beware — don’t stare too long into the eyes.
  ![Preview 320x320](https://github.com/dkozhukhar/cat-shooter/blob/main/preview_img/preview_320x320_50kb.png)
 
 ### Links
-* [Making of: How my 2025 js13k game Cat Shooter Ritual Catacombs was born](https://github.com/dkozhukhar/cat-shooter/blob/main/POSTMORTEM.md)  
+* [Making of: Short and polished notes on how my 2025 js13k game Cat Shooter Ritual Catacombs was born](https://github.com/dkozhukhar/cat-shooter/blob/main/POSTMORTEM.md)  
