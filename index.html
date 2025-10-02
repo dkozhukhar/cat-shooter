@@ -1,5 +1,5 @@
 <!-- ready for terser+roadroller -->
-<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs</title>
+<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs DC 02.10.2025</title>
 <style>html,body{margin:0;height:100%;overflow:hidden;background:#000}canvas{display:block;width:100vw;height:100vh; image-rendering: pixelated;}</style>
 <canvas id=c></canvas>
 <!-- crosshair -->
@@ -28,9 +28,9 @@ const canvas=c, gl=canvas.getContext('webgl2',{antialias:false,depth:false,stenc
  let W=0,H=0, DPR=Math.min(1,devicePixelRatio||1);
  // пресети внутрішнього рендеру (від кращої якості до простішої)
  const RES_PRESETS = [
-   [400,300], [320,240], [288,216], [256,192], [224,168], [192,144]
+   [640,480], [512,384], [400,300], [320,240], [288,216], [256,192], [224,168], [192,144]
  ];
- let resIdx = 0; // 0 = найкраща (320x240)
+ let resIdx = 0; // 0 = найкраща (640x480)
  function setRenderSize(idx){
    resIdx = Math.max(0, Math.min(RES_PRESETS.length-1, idx));
    const [rw, rh] = RES_PRESETS[resIdx];
@@ -85,22 +85,50 @@ function sfx(f=1200,len=0.08,vol=0.2,type='square'){let o=ac.createOscillator(),
 const TILE=2.0;
 // ЗАМІСТЬ const LEVELS=[...] → 3 фіксовані «закриті» рівні
 const LEVELS=[
-  // Level 1 — одна кімната ~8×8: 3 S, 2 k, двері d видно здалеку
+  // Level 1 — дуже маленький, одна кімната ~3×5 та вхід у катакомби: 3 S, 0 k, двері d видно здалеку
+  // Знайомство із рухом та дверями
   [
-    "ooooooooooo*****",
-    "o***S*****XSSSdo",
-    "o*********o",
-    "o*********o",
-    "o*********o",
-    "o*p**d**Sko",
-    "o*********o",
-    "o*********o",
-    "o*k*S*k***o",
-    "o*********o",
-    "ooooooooooo"
+    "oooooooooo",
+    "o********o",
+    "ooooo****o",
+    "o***E***po",
+    "ooooo****o",
+    "o********o",
+    "oooooooooo"
+  ],
+  // Level 2 — дуже широкий коридор ~1×15: 1 k, 3 S, двері d видно здалеку
+  // Знаймомство із котами
+  [
+    "ooooooooooooooooooooooooo",
+    "oooooooo**********oooooo",
+    "o******E*k************po",
+    "oooooooo***k******oooooo",
+    "ooooooooooooooooooooooooo"
+  ],
+  // Level 3 - знайомство із шардами S
+  [
+    "ooooooooooooo",
+    "o***S**oooooo",
+    "o*p*S**d****o",
+    "o***S**oooooo",
+    "ooooooooooooo"
+  ],  
+  // Level 4 — одна кімната ~8×8 потім довгий корідор, невеличкий лабірінт: 3 S, 4 k, двері d трохи приховані у тунелях
+  [
+    "ooooooooooo*****oooooooooooooooooooooooo",
+    "o*********XSSSdoooooo********dooooooo",
+    "o****o****oooooooooooo*ooo*oooooooooo",
+    "o*********oooooooooooo*oooooooooooooo",
+    "o*********oooo*ooooooo*oooooooooooooo",
+    "o*p**o**Sk************k************So",
+    "o*********oooooooooooo*ooooooo*oooooo",
+    "o*********oooooooooooo*ooooooo*oooooo",
+    "o*k**ok***ooooooooooo***ooooooooooooo",
+    "o*********ooooooooooo*S*ooooooooooooo",
+    "ooooooooooooooooooooooooooooooooooooo"
   ],
 
-  // Level 2 — ~16×16, 3–4 кімнати, більше котів, «зала колонн», двері d=3, багато S (<=8)
+  // Level 5 — ~16×16, 3–4 кімнати, більше котів, «зала колонн», двері d=3, багато S (<=8)
   [
     "oooooooooooooooo*****",
     "o*p**S**o***d*XSSSdo",
@@ -117,7 +145,35 @@ const LEVELS=[
     "o***o***kSo***o",
     "ooooooooooooooo"
   ],
-  // Level 3 — дуже великий, велика D-двері поруч зі стартом (6 S на карті), таємна кімната за X з d=3
+  // Level 6 — filler level, знайомство з турелями T
+  [
+    "ooooooooooooooooooooooooo***",
+    "o*p********T***********doooo",
+    "oooooo****************ooooooo***",
+    "oooooooo************o*oooooooo***",
+    "ooooooooooSSSooooooooooooo***",
+    "ooT**ooooooooooooo***",
+  ],
+  // Level 7
+  // довгий плутаний коридор із турелями та котами
+  [ 
+    "ooooooooooooooooooooooooo***",
+    "o*p**********T****o****doooo",
+    "oooooo***oooooooooo*oooooooo***",
+    "oooooooo***oooooooo*oooooooo***",
+    "oooooooooo***ooooooSooooooo***",
+    "ooT*****S**oooooooo*ooooo***",
+    "ooooo*ooooooooooooo*ooooo***",
+    "ooo***ooooooooooooo*ooooo***",
+    "oo**o*ooooooooooooo*ooooo***",
+    "ook*o*oooo*T********oooooooooo***",
+    "ooo***ooooooo*ooooooooooo***",
+    "oo**o*ooooooo*ooooooooooo***",
+    "oo**o***S****kooooooooooooooooooo***",
+    "oo**o*ooooooooooooooooooo***",
+    "ooooooooooooooooooooooooo***",
+  ],
+  // Level 8 — дуже великий, велика D-двері поруч зі стартом (6 S на карті), таємна кімната за X з d=3
   [
     "ooooooooooooooooooooooooo***",
     "o*p*D*******************XSdo",
@@ -141,8 +197,17 @@ const LEVELS=[
     "o********k************kSo",
     "ooooooooooooooooooooooooo"
   ],
+  // Level 9 — filler level, знайомство із босом (який неактивний) + трохи лікувальних сфер H
+  [
+    "ooooooooooooooooooooooo**",
+    "op**************H*****o",
+    "o***oo***oo***oo******o",
+    "o**Hoo***ooH**ooH*****do",
+    "o******************SSSo",
+    "oooooooooooooooooooooo"
+  ],
   // додаткові рівні для циклу
-  // 4
+  // 10
   [
   "oooooooooooooooooooo****",
   "o**********H********XSSdo",
@@ -153,7 +218,7 @@ const LEVELS=[
   "o****k***H**S*****k*o",
   "oooooooooooooooooooo"
   ],
-  // 5
+  // 11
   [
   "ooooooooooo****",
   "o****d****XSSdo",
@@ -167,7 +232,7 @@ const LEVELS=[
   "o*********o",
   "ooooooooooo"
   ],
-  // 6
+  // 12
   [
   "ooooooooooooooooo****",
   "o*p*****S*****Do",
@@ -181,7 +246,7 @@ const LEVELS=[
   "o******S*******o",
   "ooooooooooooooooo"
   ],
-  //boss test level 7
+  //boss test level 13
   [
     "oooooooooooooooooooo*****",
     "o****p****H*****H**XSSSdo",
@@ -219,7 +284,7 @@ function parseLevel(level){
       if(ch==='C'||ch==='c'||ch==='K'||ch==='k') catSpawns.push([x,y,z]);
       if(ch==='S') sphereSpawns.push([x,y,z]);
       if(ch==='H'||ch==='h') healSpawns.push([x,y,z]);
-      if(ch==='d'||ch==='D') doors.push({x,y,z,ch}); // зберігаємо символ для req
+      if(ch==='d'||ch==='D'||ch==='E'||ch==='e') doors.push({x,y,z,ch}); // зберігаємо символ для req (E/e = free)
       if(ch==='T') turretSpawns.push([x,y,z]); // NEW
       // NEW: boss marker
       if(ch==='B') bossPos=[x,0.0,z];
@@ -264,7 +329,8 @@ function buildTileTexture(level){
 let boss = {active:false,pos:[0,0,0],scale:2.0,phase:0,until:0,eyes:0,lives:9,nextShot:0,didNova:false};
 
 // ---- Мульти-списки з карти ----
-const MAX_CATS=13, MAX_SPHERES=12, MAX_DOORS=4;
+const MAX_CATS=13, MAX_SPHERES=8, MAX_DOORS=4; // менший ліміт — рідкісніші релік-шарди
+const SHARDS_LIMIT=5; // макс. шардiв на рівень
 // NEW: turrets + orbs
 const MAX_TURRETS=6, MAX_ORBS=12;
 const TURRET_RANGE=8.0, ORB_SPEED=2.1, ORB_DMG=10;
@@ -290,25 +356,26 @@ function loadLevel(levelRows){
   // шард-и
   spheres = [];
   // звичайні шард-и (зелені)
-  spheres.push(...LV.sphereSpawns.slice(0, MAX_SPHERES).map(([x,y,z])=>({
-    pos:[x, -0.2, z], R:0.3, downUntil:0, collected:false, type:'shard'
+  const cap = Math.min(MAX_SPHERES, SHARDS_LIMIT);
+  spheres.push(...LV.sphereSpawns.slice(0, cap).map(([x,y,z])=>({
+    pos:[x, -0.1, z], R:0.3, downUntil:0, collected:false, type:'shard'
   })));
   // лікувальні (ціанові) — додаємо, якщо влізуть у ліміт
   const roomLeft = Math.max(0, MAX_SPHERES - spheres.length);
   spheres.push(...LV.healSpawns.slice(0, roomLeft).map(([x,y,z])=>({
-    pos:[x, -0.2, z], R:0.3, downUntil:0, collected:false, type:'heal'
+    pos:[x, -0.1, z], R:0.3, downUntil:0, collected:false, type:'heal'
   })));
   
   //spheres = LV.sphereSpawns.slice(0, MAX_SPHERES).map(([x,y,z])=>({
   //   pos:[x, -0.2, z], R:0.3, downUntil:0, collected:false
   //}));
-  // двері з req за символом: d=3, D=6
+  // двері з req за символом: E/e=0, d=3, D=6
   doors = LV.doors.slice(0, MAX_DOORS).map(d=>({
     pos:[d.x, 0.0, d.z],
     // ширина дверей ≈ повна ширина тайла (більше не прослизнути краями)
     half:[0.08, 0.6, TILE*0.5-0.08],
     open:false,
-    req: d.ch==='D'?6:3,
+    req: (d.ch==='D') ? 6 : ((d.ch==='E'||d.ch==='e') ? 0 : 3),
     activeVisual:false
   }));
   // NEW: turrets
@@ -471,7 +538,18 @@ float smin(float a, float b, float k){
   return mix(b, a, h) - k*h*(1.0 - h);
 }
 float opInter(float a, float b){ return max(a,b); } // (припасовано для вух, якщо треба)
-
+float opSub(float a, float b){ return max(a, -b); } // SDF-віднімання (вирізи)
+// --- extra SDF helpers for "relic spinner" shard ---
+// mat2 r2(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+// float sdTorus(vec3 p, vec2 t){ vec2 q=vec2(length(p.xz)-t.x, p.y); return length(q)-t.y; } // (залишаємо, якщо десь знадобиться)
+// float sdOctahedron(vec3 p, float s){
+//   p=abs(p); float m=p.x+p.y+p.z - s; vec3 q=max(p-vec3(s),0.0); return min(m, length(q));
+// }
+// НОВЕ: округлий шард — низький еліпсоїд (обертання)
+float sdShard(vec3 q){
+  // радіуси: X/Z ~ 0.26, Y ~ 0.14 (низький силует)
+  return sdEllipsoid(q, vec3(0.26, 0.14, 0.26));
+}
 
 // дві площини y=±h (поверхні, НЕ заповнений шар)
 float sdTwoPlanesY(vec3 p, float h){
@@ -586,13 +664,22 @@ vec2 map(vec3 p){
       if(db < d){ d=db; m=1.; }
     }
   }  
-  // сфери з карти (мат 2.xx)
   for(int i=0;i<MAX_SPHERES;i++){
     if(i>=uSphereCount) break;
     if(uSpheresActive[i] < 0.5) continue;
     vec3 sp = uSpheresPos[i].xyz;
-    float rr = abs(uSpheresPos[i].w);
-    float ds = sdSphere(p - sp, rr);
+    float rW = uSpheresPos[i].w;
+    bool isHeal = (rW<0.0);
+    bool isProj = (uSpheresActive[i] > 1.5);
+    float rr = abs(rW);
+    vec3 q = p - sp;
+    float ds;
+    if(isProj || isHeal){
+      ds = sdSphere(q, rr);
+    } else {
+      // НОВЕ: шард статичний (без обертання), коротший bicone
+      ds = sdShard(q);
+    }
     if(ds < d){ d=ds; m=packSphereId(i); }
   }
   // кіт (мат 3.xx, де xx — індекс*0.01) — масив
@@ -713,7 +800,39 @@ void main(){
     } else if(isHeal){
       col = vec3(0.05,0.10,0.12) + 0.8*vec3(0.2,0.9,1.6);
     } else {
-      col = vec3(0.05,0.12,0.04) + 0.7*vec3(0.2,0.9,0.2);
+      // НОВЕ: шард — дрібніший узор (тайлінг по колу), колір як у активних дверей
+      vec3 pr = p - uSpheresPos[siHit].xyz;
+      float ang = atan(pr.z, pr.x);
+      float u = fract(ang/6.2831853 + 0.05*uTime + float(siHit)*0.11);
+      // під нову висоту еліпсоїда — менше h
+      float h = 0.20;
+      float v = clamp((pr.y + h)/(2.0*h), 0.0, 1.0);
+      vec2 uv = vec2(u,v);
+
+      // ДРІБНИЙ УЗОР: локальні UV з тайлінгом ×1.8 (і легким скролом по U)
+      float tileK = 1.8;
+      vec2 suv = fract(uv*tileK + vec2(0.07*uTime, 0.0));
+
+      float panel = 0.55 + 0.45*sin(uTime*1.8 + float(siHit)*1.3);
+      vec3 base  = vec3(0.06,0.06,0.08);
+      vec3 colOn = vec3(1.60, 0.35, 0.90);   // як у активних дверей
+
+      float ring = smoothstep(0.08, 0.00, min(uv.y,1.0-uv.y));
+      float seam = smoothstep(0.06, 0.00, abs(uv.x-0.5));
+      float swirl= 0.5 + 0.5*sin(suv.x*6.2831853*3.0 - uTime*1.6 + suv.y*2.0);
+
+      float rune = catRune(suv);
+      float paw  = pawMask(suv) * smoothstep(0.4, 0.9, uv.y);
+
+      float eBoost = mix(1.0, 1.6, smoothstep(8.0, 22.0, t));
+
+      vec3 emiss = vec3(0.0);
+      emiss += panel * 0.28 * colOn;
+      emiss += (0.10*ring + 0.12*seam + 0.18*swirl) * colOn;
+      emiss += (0.25*rune + 0.20*paw) * (0.4 + 0.6*(0.5+0.5*sin(uTime*6.0+float(siHit)))) * colOn;
+      emiss *= eBoost;
+
+      col = base + emiss;
     }
   } else if(mat < 4.0){
     // кіт: беремо стан саме того кота, в якого влучили
@@ -851,7 +970,7 @@ void main(){
   // muzzle flash bloom at screen center
   float flash = uMuzzle * smoothstep(0.6, 0.0, length(uv));
   colFog += flash * 0.6;
-  colFog *= 1.3; // global brighten factor
+  colFog *= 2.5; // global brighten factor
   o=vec4(colFog,1.0);  
 }
 `;
@@ -949,16 +1068,19 @@ canvas.addEventListener('mousedown',e=>{
     const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
     const F=[sy*cp, sp, -cy*cp], U=[-sy*sp, cp, cy*sp], Rv=[cy,0,sy];
     const O=pos, D=F;
-    // --- hitscan по СФЕРАХ (усі активні)
+    // --- hitscan по СФЕРАХ — не приховуємо шард/хіл при пострілах ---
     for (let i=0;i<spheres.length;i++){
       const s=spheres[i]; if(s.collected) continue;
-      //const s=spheres[i]; if(now < s.downUntil) continue;
       const C=s.pos, R=s.R;
       const OC=[O[0]-C[0],O[1]-C[1],O[2]-C[2]];
       const t = -(OC[0]*D[0]+OC[1]*D[1]+OC[2]*D[2]);
       if(t>0){
         const qx=OC[0]+t*D[0], qy=OC[1]+t*D[1], qz=OC[2]+t*D[2];
-        if(Math.hypot(qx,qy,qz)<=R+0.02){ s.downUntil=now+2000; }
+        if(Math.hypot(qx,qy,qz)<=R+0.02){
+          // залишаємо механізм “пірнання”, але на 0 мс для shard/heal
+          if(s.type==='shard' || s.type==='heal'){ s.downUntil = now - 1; }
+          // інші типи (якщо з’являться) можуть мати свій таймаут
+        }
       }
     }
     // --- утиліта для хітскану по сфері
