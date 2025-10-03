@@ -57,6 +57,10 @@ let shardCount=0, hp=100, gameOver=false, hurtPulse=0, muzzle=0;
 let fearPulse=0;
 // NEW: recoil + xhair + ROF
 let pitchKick=0, xhPulse=0, nextShotAt=0;
+// NEW: mouse sensitivity (feedback)
+let MOUSE_SENS=0.002;
+// NEW: footsteps accumulators
+let stepCarry=0, stepFlip=0;
 const SHOT_CD=120; // ms between shots
 // track right mouse button state
 let rightMouse = false;
@@ -96,21 +100,108 @@ const WRAITH_ORBIT_R=1.9, WRAITH_SPEED=1.2, WRAITH_DRAIN_RANGE=4.0;
 
 // --- minimal "zzfx" style inline shot sound ---
 const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
-function sfx(f=1200,len=0.08,vol=0.2,type='square'){let o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=vol;let t=ac.currentTime;o.start(t);g.gain.exponentialRampToValueAtTime(0.0001,t+len);o.stop(t+len)}
-// NEW: layered gunshot (crack + thump + noise burst), sub-200B after minify
+function sfx(f=1200,len=0.08,vol=0.2,type='square'){
+  let o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.value=f;o.connect(g);
+  // ROUTE: єдина SFX-шина
+  g.connect(gSfx);
+  let t=ac.currentTime;
+  g.gain.setValueAtTime(0.0001,t);
+  g.gain.linearRampToValueAtTime(vol, t+0.006);                  // 6 ms атака
+  g.gain.exponentialRampToValueAtTime(0.0001, t+len);            // реліз
+  o.start(t); o.stop(t+len+0.01);
+}
+// --- minimal mix/echo bus + ambience/sfx (NEW) ---
+const master=ac.createGain();master.gain.value=1.0;
+// NEW: soft limiter to catch peaks
+const comp=ac.createDynamicsCompressor();
+comp.threshold.value=-16; comp.knee.value=6; comp.ratio.value=3; comp.attack.value=0.003; comp.release.value=0.20;
+master.connect(comp); comp.connect(ac.destination);
+const echoIn=ac.createGain(), echo=ac.createDelay(), fb=ac.createGain(), wet=ac.createGain();
+echo.delayTime.value=0.21; fb.gain.value=0.22; wet.gain.value=0.28; // tighter, less ring
+echoIn.connect(echo); echo.connect(fb); fb.connect(echo); echo.connect(wet); wet.connect(master);
+// NEW: persistent buses (no per-call node churn)
+const gSfx=ac.createGain(); gSfx.gain.value=1.0; gSfx.connect(master); gSfx.connect(echoIn);
+// REWIRE AMBIENT: add highpass to kill low hum
+const gAmb=ac.createGain(); gAmb.gain.value=1.0;
+const ambHP=ac.createBiquadFilter(); ambHP.type='highpass'; ambHP.frequency.value=55; // try 55–70 Hz
+gAmb.connect(ambHP); ambHP.connect(master); ambHP.connect(echoIn);
+const gMus=ac.createGain(); gMus.gain.value=1.0; gMus.connect(master); gMus.connect(echoIn);
+
+// NEW: toggle for tonal music bed (disabled by default)
+let MUSIC_BED=0;
+
+// NEW: music "bed" — periodic, independent of ambient
+let musBedStarted=false, bedG=null;
+function startMusicBed(){
+  if(musBedStarted) return; musBedStarted=true;
+  bedG=ac.createGain(); bedG.gain.value=0.0; bedG.connect(gMus);
+  // gentle filter for smooth texture
+  const lp=ac.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=420; lp.Q.value=0.7; lp.connect(bedG);
+  // two low oscs (root + fifth), very soft
+  const o1=ac.createOscillator(); o1.type='triangle';
+  const o2=ac.createOscillator(); o2.type='sawtooth';
+  o1.frequency.value=110; o2.frequency.value=165;
+  o1.connect(lp); o2.connect(lp); o1.start(); o2.start();
+  // slow detune drift (no clicks)
+  setInterval(()=>{
+    const t=ac.currentTime, f=100+Math.random()*40;
+    o1.frequency.setTargetAtTime(f, t, 1.5);
+    o2.frequency.setTargetAtTime(f*1.5, t, 1.5);
+  }, 2200);
+
+  // independent “breathing” cycle 12–30 s with rests + sparse plucks
+  (function bedCycle(){
+    const t=ac.currentTime;
+    const P=12+Math.random()*18; // 12..30 s
+    const up=P*0.32, hold=P*0.16, down=P*0.52;
+    const lo=0.00+Math.random()*0.01, hi=0.02+Math.random()*0.01;
+    bedG.gain.cancelScheduledValues(t);
+    bedG.gain.setValueAtTime(lo,t);
+    bedG.gain.linearRampToValueAtTime(hi,t+up);
+    bedG.gain.setValueAtTime(hi,t+up);
+    bedG.gain.linearRampToValueAtTime(lo,t+up+hold+down);
+
+    // tiny inner plucks on the plateau
+    const n=3+(Math.random()*3|0);
+    for(let i=0;i<n;i++){
+      const at=(t+up+0.05)+Math.random()*(Math.max(0,hold-0.10));
+      let o=ac.createOscillator(), g=ac.createGain();
+      o.type='square';
+      const root=110, S=[0,3,5,7,10], st=S[Math.random()*S.length|0];
+      o.frequency.value=root*Math.pow(2,st/12);
+      g.gain.value=0.0; o.connect(g); g.connect(bedG);
+      g.gain.setValueAtTime(0.0,at); g.gain.linearRampToValueAtTime(0.06,at+0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001,at+0.14);
+      o.start(at); o.stop(at+0.16);
+    }
+    setTimeout(bedCycle, (P*1000)|0);
+  })();
+}
+// helper: duck bed under stinger
+function duckBed(sec=8, amt=0.45){
+  if(!bedG) return;
+  const t=ac.currentTime, g=bedG.gain, cur=g.value||0.0001;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(cur, t);
+  g.linearRampToValueAtTime(cur*amt, t+0.20);
+  g.linearRampToValueAtTime(cur, t+sec+0.20);
+}
+function bus(v=1){let g=ac.createGain();g.gain.value=v;g.connect(master);g.connect(echoIn);return g;} // kept for legacy, not used below
+
+// NEW: layered gunshot (unchanged logic, routed to bus)
 function gunShot(v=0.28){
-  const t=ac.currentTime, out=ac.createGain(); out.gain.value=v; out.connect(ac.destination);
+  const t=ac.currentTime, out=bus(v);
   // CRACK (square, pitch drop)
   let o1=ac.createOscillator(), g1=ac.createGain();
   o1.type='square'; o1.frequency.setValueAtTime(1400,t); o1.frequency.exponentialRampToValueAtTime(700,t+0.07);
   g1.gain.setValueAtTime(0.9,t); g1.gain.exponentialRampToValueAtTime(0.0001,t+0.09);
   o1.connect(g1); g1.connect(out); o1.start(t); o1.stop(t+0.1);
-  // THUMP (low sine, short)
+  // THUMP
   let o2=ac.createOscillator(), g2=ac.createGain();
   o2.type='sine'; o2.frequency.setValueAtTime(120,t); o2.frequency.exponentialRampToValueAtTime(90,t+0.10);
   g2.gain.setValueAtTime(0.55,t); g2.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
   o2.connect(g2); g2.connect(out); o2.start(t); o2.stop(t+0.13);
-  // NOISE BURST (band-passed)
+  // NOISE BURST
   let n=ac.createBuffer(1,(ac.sampleRate*0.06)|0,ac.sampleRate), d=n.getChannelData(0);
   for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
   let ns=ac.createBufferSource(); ns.buffer=n;
@@ -118,6 +209,157 @@ function gunShot(v=0.28){
   let gn=ac.createGain(); gn.gain.value=0.35; ns.connect(bp); bp.connect(gn); gn.connect(out);
   ns.start(t); ns.stop(t+0.06);
 }
+
+// NEW: ambience (drone + wind, ultra-cheap)
+let ambStarted=false;
+function startAmbience(){
+  if(ambStarted) return; ambStarted=true;
+  const t0=ac.currentTime;
+
+  // WIND (detuned sines/saws → bandpass), без луп-шва
+  let bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=320; bp.Q.value=0.7;
+  let wg=ac.createGain(); wg.gain.value=0.0; bp.connect(wg); wg.connect(gAmb);
+  for(let i=0;i<5;i++){
+    let ow=ac.createOscillator(), gw=ac.createGain();
+    ow.type='sawtooth'; ow.frequency.value=220+Math.random()*420;
+    gw.gain.value=0.02+Math.random()*0.03; ow.connect(gw); gw.connect(bp); ow.start(t0);
+  }
+  // м’який старт вітру
+  wg.gain.setValueAtTime(0.0,t0); wg.gain.linearRampToValueAtTime(0.06,t0+0.30);
+
+  // колір вітру (спектр)
+  setInterval(()=>{
+    bp.frequency.setTargetAtTime(260+Math.random()*220, ac.currentTime, 0.7);
+  }, 1200);
+
+  // --- NEW: DRONE (низький синус), незалежний цикл 10–30 c + частотний дрейф ---
+  const dLP = ac.createBiquadFilter(); dLP.type='lowpass'; dLP.frequency.value=220;
+  const dg  = ac.createGain(); dg.gain.value=0.0;
+  const dOsc= ac.createOscillator();
+  dOsc.type='sine'; dOsc.frequency.value=58; // базова нота (легко “дияволська”)
+  dOsc.connect(dLP); dLP.connect(dg); dg.connect(gAmb);
+  dOsc.start(t0);
+
+  // легкий дрейф частоти (58 ± ~4 Гц), плавно, без клацань
+  setInterval(()=>{
+    const f = 56 + Math.random()*8; // 56..64 Гц
+    dOsc.frequency.setTargetAtTime(f, ac.currentTime, 1.2);
+  }, 1800);
+
+  // незалежний “дихальний” цикл гучності drone (асинхронно до вітру)
+  (function droneCycle(){
+    const t=ac.currentTime;
+    const P = 10 + Math.random()*20;        // 10..30 s
+    const up=P*0.30, hold=P*0.14, down=P*0.56;
+    const lo= 0.00 + Math.random()*0.01;    // майже тиша
+    const hi= 0.04 + Math.random()*0.05;    // пік (тонкий, щоб не “грузити”)
+
+    dg.gain.cancelScheduledValues(t);
+    dg.gain.setValueAtTime(lo, t);
+    dg.gain.linearRampToValueAtTime(hi, t+up);
+    dg.gain.setValueAtTime(hi, t+up);
+    dg.gain.linearRampToValueAtTime(lo, t+up+hold+down);
+
+    //setTimeout(droneCycle, (P*1000)|0);
+  })();
+
+  // --- існуючий цикл амбієнту (тільки для вітру + wet) ---
+  (function ambCycle(){
+    const t=ac.currentTime;
+    const P = 10 + Math.random()*20;          // 10..30 s
+    const up = P*0.35, hold=P*0.18, down=P*0.47;
+    const lo = 0.00 + Math.random()*0.01;
+    const hi = 0.08 + Math.random()*0.06;
+
+    // ВІТЕР гучність — тільки setTargetAtTime (без миттєвих стрибків)
+    wg.gain.cancelScheduledValues(t);
+    wg.gain.setTargetAtTime(lo, t,           0.30);
+    wg.gain.setTargetAtTime(hi, t+up*0.15,   0.60);
+    wg.gain.setTargetAtTime(lo, t+up+hold,   0.60);
+
+    // НЕ модулюємо wet.gain (стабільний reverb рівень)
+    setTimeout(ambCycle, (P*1000)|0);
+  })();
+
+  // музика планується у loadLevel (one-shot per level)
+  if(MUSIC_BED) startMusicBed(); // was: startMusicBed();
+}
+
+// NEW: footsteps + cat vocals
+function footstep(v=0.16){ sfx(110+Math.random()*30,0.06,v,'triangle'); }
+function catHiss(v=0.18){
+  const t=ac.currentTime;
+  let n=ac.createBuffer(1,(ac.sampleRate*0.22)|0,ac.sampleRate), d=n.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+  let src=ac.createBufferSource(); src.buffer=n;
+  let bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1900; bp.Q.value=5;
+  let eg=ac.createGain(); eg.gain.setValueAtTime(0.0,t); eg.gain.linearRampToValueAtTime(v,t+0.01); eg.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
+  src.connect(bp); bp.connect(eg); eg.connect(gSfx); src.start(t); src.stop(t+0.22);
+}
+function catMeow(v=0.20){
+  const t=ac.currentTime, out=gSfx;
+  let o=ac.createOscillator(), g=ac.createGain();
+  o.type='sawtooth'; o.frequency.setValueAtTime(380,t); o.frequency.exponentialRampToValueAtTime(220,t+0.10);
+  g.gain.setValueAtTime(0.9*v,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
+  o.connect(g); g.connect(out); o.start(t); o.stop(t+0.13);
+}
+function wraithWhine(v=0.12){
+  const t=ac.currentTime, out=gSfx;
+  let o=ac.createOscillator(), g=ac.createGain();
+  o.type='sine'; o.frequency.setValueAtTime(620,t); o.frequency.exponentialRampToValueAtTime(420,t+0.25);
+  g.gain.setValueAtTime(0.5*v,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.28);
+  o.connect(g); g.connect(out); o.start(t); o.stop(t+0.3);
+}
+// NEW: minimalist “stinger” music — sparse, random, with reprise
+let mus={on:false,next:Infinity,played:false};
+function scheduleMusicIn(ms=3000){
+  if(mus.played) return;
+  const n=performance.now()+ms;
+  mus.next = isFinite(mus.next) ? Math.min(mus.next, n) : n;
+}
+function musicCue(){
+  if(mus.on||!ambStarted) return; mus.on=true;
+  const t0=ac.currentTime+0.03, root=[55,65,73,82][(Math.random()*4|0)], mode=(Math.random()*3|0);
+  const len=6+Math.random()*5, tEnd=t0+len, MV=0.26; // was 0.42 → чистіше, без «пампінгу»
+
+  // груповий фільтр для всього стингера (м’якше, без піску)
+  const mOut=ac.createGain(); mOut.gain.value=1.0; mOut.connect(gMus);
+  const mLP=ac.createBiquadFilter(); mLP.type='lowpass'; mLP.frequency.value=1400; mLP.Q.value=0.7; mLP.connect(mOut);
+
+  duckBed(len, 0.35);
+
+  // low drone
+  { let o=ac.createOscillator(), g=ac.createGain();
+    o.type='triangle'; o.frequency.value=root; o.connect(g); g.connect(mLP);
+    g.gain.setValueAtTime(0.0,t0);
+    g.gain.linearRampToValueAtTime(0.16*MV,t0+0.45);
+    g.gain.exponentialRampToValueAtTime(0.0001,tEnd);
+    o.start(t0); o.stop(tEnd+0.05);
+  }
+  // plucks (з атаками, у LP)
+  const S=[0,3,5,7,10,12];
+  const n=9+((mode===2)?3:0);
+  for(let i=0;i<n;i++){
+    let st=S[Math.random()*S.length|0]; if(mode===1 && Math.random()<0.35) st+=1;
+    const f=root*Math.pow(2,st/12), at=t0+Math.random()*(len*0.8), d=0.10+Math.random()*0.20, v=(0.10+Math.random()*0.10)*MV;
+    let o=ac.createOscillator(), g=ac.createGain(); o.type='sawtooth'; o.frequency.value=f; o.connect(g); g.connect(mLP);
+    g.gain.setValueAtTime(0.0001,at);
+    g.gain.linearRampToValueAtTime(v,at+0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001,at+d);
+    o.start(at); o.stop(at+d+0.03);
+  }
+  // reprise knocks (м’яко)
+  for(let j=0;j<3;j++){
+    const at=tEnd-0.6 + j*0.18; let o=ac.createOscillator(), g=ac.createGain();
+    o.type='triangle'; o.frequency.value=root*(1+0.02*j); o.connect(g); g.connect(mLP);
+    g.gain.setValueAtTime(0.0001,at);
+    g.gain.linearRampToValueAtTime(0.14*MV,at+0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, at+0.12);
+    o.start(at); o.stop(at+0.14);
+  }
+  setTimeout(()=>{ mus.on=false; mus.played=true; mus.next=Infinity; }, (len*1000)|0);
+}
+
 // --- ASCII LEVEL (центруємо в світі) ---
 const TILE=2.0;
 // ЗАМІСТЬ const LEVELS=[...] → 3 фіксовані «закриті» рівні
@@ -386,11 +628,11 @@ function loadLevel(levelRows){
   // коти
   cats = LV.catSpawns.slice(0, MAX_CATS).map(([x,y,z])=>({
     pos:[x,y,z], eyes:0, attacking:false,
-    // замість whiteUntil — полярність: 0=black,1=white
     mode:0, modeUntil:0,
     spawn:[x,y,z],
     theta:Math.random()*6.283, nextBlink:performance.now()+1500+Math.random()*1500,
-    gaze:0, noGazeUntil:0
+    gaze:0, noGazeUntil:0,
+    nextSfx:0 // NEW
   }));
   // шард-и
   spheres = [];
@@ -441,6 +683,9 @@ function loadLevel(levelRows){
   // стартова підказка
   hudMsg = LV.bossPos ? 'DON\'T STARE — WAIT FOR THE EYES' : (minDoorReq>0 ? `COLLECT ${minDoorReq} SHARDS` : 'FIND EXIT');
   hudUntil = performance.now()+3200;
+  // NEW: one-shot music per level (early entrance cue)
+  mus.played=false; mus.on=false; mus.next=Infinity;
+  scheduleMusicIn(2000+Math.random()*4000);
 }
 // стартова ініціалізація
 //loadLevel(LEVELS[levelIndex]);
@@ -1118,16 +1363,26 @@ loadLevel(LEVELS[levelIndex]);
 
 function onKey(e){if(['KeyW','KeyA','KeyS','KeyD'].includes(e.code)){keys[e.code]=e.type==='keydown';e.preventDefault()}}
 document.addEventListener('keydown',onKey);document.addEventListener('keyup',onKey);
-canvas.addEventListener('mousedown',()=>{canvas.requestPointerLock?.()},{passive:true});
+canvas.addEventListener('mousedown',()=>{ 
+  // NEW: ensure AudioContext is running (avoids glitchy first sound)
+  if(ac.state==='suspended') ac.resume();
+  canvas.requestPointerLock?.();
+},{passive:true});
 document.addEventListener('pointerlockchange',()=>{},false);
 document.addEventListener('keydown',e=>{
   if(e.code==='KeyV'){ aimDebug^=1; }
+// NEW: sensitivity adjust
+  if(e.code==='BracketLeft'){ MOUSE_SENS=Math.max(0.0005, MOUSE_SENS*0.85); hudMsg=`SENS ${MOUSE_SENS.toFixed(4)}`; hudUntil=performance.now()+1200; }
+  if(e.code==='BracketRight'){ MOUSE_SENS=Math.min(0.01, MOUSE_SENS*1.18); hudMsg=`SENS ${MOUSE_SENS.toFixed(4)}`; hudUntil=performance.now()+1200; }
 });
+
 document.addEventListener('mousemove',e=>{
-  if(document.pointerLockElement===canvas){yaw+=e.movementX*0.002;pitch-=e.movementY*0.002;pitch=Math.max(-1.5,Math.min(1.5,pitch));}
+  if(document.pointerLockElement===canvas){yaw+=e.movementX*MOUSE_SENS;pitch-=e.movementY*MOUSE_SENS;pitch=Math.max(-1.5,Math.min(1.5,pitch));}
 });
 canvas.addEventListener('mousedown',e=>{
   if(e.button===0){
+    // NEW: unlock audio + ambience on first click
+    if(!ambStarted) startAmbience();
     // NEW: керування кінцівками та рестартом
     if(endState!=='none'){
       if(performance.now() < endLockUntil) return; // заблоковано на 60 с
@@ -1217,12 +1472,13 @@ canvas.addEventListener('mousedown',e=>{
         }
       }else if(best.type==='orb'){
         const b=orbs[best.idx]; if(!b.collected){ b.collected=true; sfx(420,0.05,0.18,'triangle'); }
-      }else if(best.type==='cat'){
+      } else if(best.type==='cat'){
         const c=cats[best.idx];
         if(c.mode===0){
           c.mode=1; c.modeUntil=now + CAT_SAFE_MS + 2500;
           c.attacking=false; c.eyes=0;
           hudMsg='IT SPLITS — WRAITH!'; hudUntil=now+HUD_MS; sfx(1800,0.10,0.25,'sawtooth'); fearPulse=1.0;
+          // music is one-shot per level; no extra scheduling here
         }else{
           c.modeUntil = now + Math.max(1500, (c.modeUntil-now)+800);
           hudMsg='WRAITH SHRIEKS'; hudUntil=now+HUD_MS; sfx(260,0.12,0.25,'triangle'); fearPulse=1.0;
@@ -1405,6 +1661,8 @@ function frame(t){
   frames++; let dt=(t-(frame.t||t))/1000;frame.t=t;
   // ---- адаптивна роздільна здатність ----
   frame.acc = (frame.acc||0)+dt; frame.count = (frame.count||0)+1;
+  // NEW: store previous position for footsteps
+  const prevX = frame.px==null?pos[0]:frame.px, prevZ = frame.pz==null?pos[2]:frame.pz;
   if(frame.acc >= 0.75){ // кожні ~0.75с
     const fps = frame.count / frame.acc;
     // якщо просіли нижче 55 → знизити пресет; якщо >62 і не міняли щойно → підвищити
@@ -1430,8 +1688,21 @@ function frame(t){
   next = resolveWallCollision(pos, next);
   next = resolveDoorCollision(pos, next);
   pos = next;
+  // --- footsteps (distance-based) ---
+  const moved = Math.hypot(pos[0]-prevX, pos[2]-prevZ);
+  if(!gameOver && moved>0.001){
+    stepCarry += moved;
+    if(stepCarry>0.5){
+      footstep(0.14 + Math.min(0.06, moved/dt/25));
+      stepCarry=0; stepFlip^=1;
+    }
+  }
+  frame.px = pos[0]; frame.pz = pos[2];
 
   const now=performance.now();
+  // NEW: one-shot stinger per level
+  if(!mus.on && !mus.played && now>mus.next) musicCue();
+
   // прибрано стартову ініціалізацію в frames===1 (ми робимо це в loadLevel)
   // --- pickups: shards by proximity ---
   for(let i=0;i<spheres.length;i++){
@@ -1516,8 +1787,9 @@ function frame(t){
           c.nextBlink = now + 1500 + Math.random()*1500;
           c.pos[0] = pos[0] - F[0]*1.4 + (Math.random()-0.5)*0.4*Rv[0];
           c.pos[2] = pos[2] - F[2]*1.4 + (Math.random()-0.5)*0.4*Rv[2];
-          // коротка «пільга» — не дрейнимо одразу після телепорта
-          c.noGazeUntil = now + 300;          
+          c.noGazeUntil = now + 300;
+          // NEW: wraith blink whine
+          wraithWhine(0.10);
         }
         // Холод погляду
         // Використовуємо вектор від гравця до кота (player->cat), а не навпаки
@@ -1545,7 +1817,9 @@ function frame(t){
         if(!c.attacking){
           if(dist < CAT_ALERT_RADIUS){
             c.eyes = Math.min(1, (c.eyes + dt* (1.0/CAT_EYES_DELAY_MS*1000.0)));
-            if(c.eyes>=1.0) c.attacking=true;
+            // NEW: hiss while charging (rate-limited)
+            if(c.eyes>0.5 && now>c.nextSfx){ catHiss(0.15); c.nextSfx=now+1200; }
+            if(c.eyes>=1.0){ c.attacking=true; catMeow(0.22); } // NEW: angry meow on pounce
           }else{
             c.eyes = 0.0;
             c.pos[2]+=CAT_WALK*dt;
@@ -1565,6 +1839,7 @@ function frame(t){
             hp = Math.max(0, hp-25);
             hurtPulse = 1.0;
             hudMsg='BLACK CAT ATTACKED YOU'; hudUntil=now+HUD_MS; sfx(220,0.12,0.3,'square');
+            catMeow(0.18); // NEW: hit meow
             c.pos = c.spawn.slice(); c.attacking=false; c.eyes=0;
             if(hp<=0){
               gameOver=true;
