@@ -1,10 +1,12 @@
 <!-- ready for terser+roadroller -->
-<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs DC 02.10.2025</title>
+<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs — Director's Cut Version 03.10.2025</title>
 <style>html,body{margin:0;height:100%;overflow:hidden;background:#000}canvas{display:block;width:100vw;height:100vh; image-rendering: pixelated;}</style>
 <canvas id=c></canvas>
 <!-- crosshair -->
-<div id="xh" style="position:fixed;left:50%;top:50%;width:24px;height:24px;margin:-12px 0 0 -12px;pointer-events:none;"><div style="position:absolute;left:11px;top:0;width:2px;height:24px;background:#fff;opacity:.7"></div><div style="position:absolute;left:0;top:11px;width:24px;height:2px;background:#fff;opacity:.7"></div></div>
-<div id="hud" style="
+ <div id="xh" style="position:fixed;left:50%;top:50%;width:24px;height:24px;pointer-events:none;transform:translate(-50%,-50%);transform-origin:50% 50%;">
+   <div style="position:absolute;left:11px;top:0;width:2px;height:24px;background:#fff;opacity:.7"></div>
+   <div style="position:absolute;left:0;top:11px;width:24px;height:2px;background:#fff;opacity:.7"></div>
+ </div><div id="hud" style="
   position:fixed;
   top:5%;
   left:50%;
@@ -53,11 +55,25 @@ let keys={}, yaw=0, pitch=0, pos=[0,0,0], frames=0, startT=performance.now(), en
 let shardCount=0, hp=100, gameOver=false, hurtPulse=0, muzzle=0;
 // додати холод страху
 let fearPulse=0;
+// NEW: recoil + xhair + ROF
+let pitchKick=0, xhPulse=0, nextShotAt=0;
+const SHOT_CD=120; // ms between shots
 // track right mouse button state
 let rightMouse = false;
+// NEW: impact decals (до 8 короткоживучих слідів)
+const MAX_DECALS=8, DECAL_TTL=800; // ms
+let decals=[];
+// NEW: last rendered camera basis (to align hitscan with what you see)
+let lastCam=[0,0,0], lastF=[0,0,0], lastU=[0,0,0], lastR=[0,0,0];
+// NEW: CPU copy of aim offset (to match shader ray exactly)
+let aimOff=[0,0];
+// NEW: debug flag (V to toggle)
+let aimDebug=0;
 // --- HUD ---
 const hud=document.getElementById('hud');
 let hudUntil=0, hudMsg='';
+// NEW: crosshair ref
+const xh=document.getElementById('xh');
 // NEW: кінцівки
 let endState='none'; // 'none'|'fail'|'bossWin'|'ritualWin'
 let endLockUntil=0;
@@ -81,6 +97,27 @@ const WRAITH_ORBIT_R=1.9, WRAITH_SPEED=1.2, WRAITH_DRAIN_RANGE=4.0;
 // --- minimal "zzfx" style inline shot sound ---
 const AC=window.AudioContext||window.webkitAudioContext;const ac=new AC();
 function sfx(f=1200,len=0.08,vol=0.2,type='square'){let o=ac.createOscillator(),g=ac.createGain();o.type=type;o.frequency.value=f;o.connect(g);g.connect(ac.destination);g.gain.value=vol;let t=ac.currentTime;o.start(t);g.gain.exponentialRampToValueAtTime(0.0001,t+len);o.stop(t+len)}
+// NEW: layered gunshot (crack + thump + noise burst), sub-200B after minify
+function gunShot(v=0.28){
+  const t=ac.currentTime, out=ac.createGain(); out.gain.value=v; out.connect(ac.destination);
+  // CRACK (square, pitch drop)
+  let o1=ac.createOscillator(), g1=ac.createGain();
+  o1.type='square'; o1.frequency.setValueAtTime(1400,t); o1.frequency.exponentialRampToValueAtTime(700,t+0.07);
+  g1.gain.setValueAtTime(0.9,t); g1.gain.exponentialRampToValueAtTime(0.0001,t+0.09);
+  o1.connect(g1); g1.connect(out); o1.start(t); o1.stop(t+0.1);
+  // THUMP (low sine, short)
+  let o2=ac.createOscillator(), g2=ac.createGain();
+  o2.type='sine'; o2.frequency.setValueAtTime(120,t); o2.frequency.exponentialRampToValueAtTime(90,t+0.10);
+  g2.gain.setValueAtTime(0.55,t); g2.gain.exponentialRampToValueAtTime(0.0001,t+0.12);
+  o2.connect(g2); g2.connect(out); o2.start(t); o2.stop(t+0.13);
+  // NOISE BURST (band-passed)
+  let n=ac.createBuffer(1,(ac.sampleRate*0.06)|0,ac.sampleRate), d=n.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+  let ns=ac.createBufferSource(); ns.buffer=n;
+  let bp=ac.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1600; bp.Q.value=3.5;
+  let gn=ac.createGain(); gn.gain.value=0.35; ns.connect(bp); bp.connect(gn); gn.connect(out);
+  ns.start(t); ns.stop(t+0.06);
+}
 // --- ASCII LEVEL (центруємо в світі) ---
 const TILE=2.0;
 // ЗАМІСТЬ const LEVELS=[...] → 3 фіксовані «закриті» рівні
@@ -88,7 +125,7 @@ const LEVELS=[
   // Level 1 — дуже маленький, одна кімната ~3×5 та вхід у катакомби: 3 S, 0 k, двері d видно здалеку
   // Знайомство із рухом та дверями
   [
-    "oooooooooo",
+    "oooooooooooooooo",
     "o********o",
     "ooooo****o",
     "o***E***po",
@@ -100,27 +137,29 @@ const LEVELS=[
   // Знаймомство із котами
   [
     "ooooooooooooooooooooooooo",
-    "oooooooo**********oooooo",
-    "o******E*k************po",
-    "oooooooo***k******oooooo",
+    "o***********************o",
+    "oooo***ok**o*k*o***oooooo",
+    "oE***k***ok**o********po",
+    "oooo***ok**ok**o***oooooo",
+    "o***********************o",
     "ooooooooooooooooooooooooo"
   ],
   // Level 3 - знайомство із шардами S
   [
     "ooooooooooooo",
-    "o***S**oooooo",
-    "o*p*S**d****o",
-    "o***S**oooooo",
+    "ooo**S**ooooo",
+    "od***S*****po",
+    "ooo**S**ooooo",
     "ooooooooooooo"
   ],  
   // Level 4 — одна кімната ~8×8 потім довгий корідор, невеличкий лабірінт: 3 S, 4 k, двері d трохи приховані у тунелях
   [
-    "ooooooooooo*****oooooooooooooooooooooooo",
-    "o*********XSSSdoooooo********dooooooo",
+    "oooooooooooooooooooooooooooooo**ooooo",
+    "o*********od******************ooooooo",
     "o****o****oooooooooooo*ooo*oooooooooo",
     "o*********oooooooooooo*oooooooooooooo",
     "o*********oooo*ooooooo*oooooooooooooo",
-    "o*p**o**Sk************k************So",
+    "o*S**o**Sk************k************po",
     "o*********oooooooooooo*ooooooo*oooooo",
     "o*********oooooooooooo*ooooooo*oooooo",
     "o*k**ok***ooooooooooo***ooooooooooooo",
@@ -130,10 +169,10 @@ const LEVELS=[
 
   // Level 5 — ~16×16, 3–4 кімнати, більше котів, «зала колонн», двері d=3, багато S (<=8)
   [
-    "oooooooooooooooo*****",
-    "o*p**S**o***d*XSSSdo",
-    "o***o*k***o***o",
-    "o***o*o*o*o***o",
+    "ooooooooooooooo",
+    "ooo*S**o******o",
+    "oD****k***o***o",
+    "ooo***o*o*o***o",
     "o****S**k*****o",
     "o***o*o*o*o***o",
     "o*k**k*****k**o",
@@ -142,23 +181,23 @@ const LEVELS=[
     "o***oS***So***o",
     "o*k*ooo*ooo**So",
     "o***o*****o***o",
-    "o***o***kSo***o",
+    "o*k**o***So**po",
     "ooooooooooooooo"
   ],
   // Level 6 — filler level, знайомство з турелями T
   [
     "ooooooooooooooooooooooooo***",
-    "o*p********T***********doooo",
+    "oE********T***********poooo",
     "oooooo****************ooooooo***",
     "oooooooo************o*oooooooo***",
-    "ooooooooooSSSooooooooooooo***",
-    "ooT**ooooooooooooo***",
+    "ooooooooooHHHooooooooooooo***",
+    "ooooo**ooooooooooooo***",
   ],
   // Level 7
   // довгий плутаний коридор із турелями та котами
   [ 
     "ooooooooooooooooooooooooo***",
-    "o*p**********T****o****doooo",
+    "o*d**********T****o****poooo",
     "oooooo***oooooooooo*oooooooo***",
     "oooooooo***oooooooo*oooooooo***",
     "oooooooooo***ooooooSooooooo***",
@@ -176,8 +215,8 @@ const LEVELS=[
   // Level 8 — дуже великий, велика D-двері поруч зі стартом (6 S на карті), таємна кімната за X з d=3
   [
     "ooooooooooooooooooooooooo***",
-    "o*p*D*******************XSdo",
-    "o***o***o***S*S***o*****o",
+    "oD*********************po",
+    "oo**o***o***S*S***o****oo",
     "o***o*S*o***ooo***o**S**o",
     "o***o***o***odo***o*****o",
     "o*******o***oXo***o*****o",
@@ -200,32 +239,32 @@ const LEVELS=[
   // Level 9 — filler level, знайомство із босом (який неактивний) + трохи лікувальних сфер H
   [
     "ooooooooooooooooooooooo**",
-    "op**************H*****o",
+    "E***************H*****po",
     "o***oo***oo***oo******o",
-    "o**Hoo***ooH**ooH*****do",
-    "o******************SSSo",
-    "oooooooooooooooooooooo"
+    "o**Hoo***ooH**ooH*****o",
+    "o*********************o",
+    "oooooooooooooooooooooo*"
   ],
   // додаткові рівні для циклу
   // 10
   [
-  "oooooooooooooooooooo****",
-  "o**********H********XSSdo",
-  "op***S***T**k*****do",
-  "o***ooo***ooo***ooo*o",
+  "ooooooooooooooooooooooo",
+  "o**********H********po",
+  "o****S***T**k******oo",
+  "d***ooo***ooo***oooo",
   "o**ko*S*k*o*Tk*o***o",
-  "o***ooo***ooo***ooo*o",
-  "o****k***H**S*****k*o",
+  "o***ooo***ooo***oooo",
+  "o****k***H**S*****ko",
   "oooooooooooooooooooo"
   ],
   // 11
   [
   "ooooooooooo****",
-  "o****d****XSSdo",
+  "d*********po",
   "o****S****o",
   "o****k****o",
   "o****o****o",
-  "oSok*p*kSo",
+  "oSok****kSo",
   "o****o****o",
   "o****k****o",
   "o****T****o",
@@ -234,22 +273,22 @@ const LEVELS=[
   ],
   // 12
   [
-  "ooooooooooooooooo****",
-  "o*p*****S*****Do",
-  "o***oooo*oooo***XSdo",
-  "o***oS****o*k*So",
-  "o***o*XoX*o***o",
-  "oT***XH*HX***So",
-  "o***o*XoX*o***o",
+  "oooooooooooooooooo****",
+  "o*******S*****oooo",
+  "o***oooo*oooo***po",
+  "o***oS****o*k*Sooo",
+  "o***o*o*o*o***o",
+  "oT***oH*Ho***So",
+  "o***o*o*ooo***o",
   "oS*k*o*****o*k*o",
-  "o***oooXXXooo***o",
-  "o******S*******o",
+  "o***oooooooo***o",
+  "D******S*******o",
   "ooooooooooooooooo"
   ],
   //boss test level 13
   [
-    "oooooooooooooooooooo*****",
-    "o****p****H*****H**XSSSdo",
+    "ooooooooooooooooooooo",
+    "o********H*****H***po",
     "o*H****************o",
     "o*************H****o",
     "o******************o",
@@ -257,7 +296,7 @@ const LEVELS=[
     "o******************o",
     "o*H***********H****o",
     "o******************o",
-    "o****H***d*******B*o",
+    "oB***H*************o",
     "oooooooooooooooooooo"
   ]
 ];
@@ -329,8 +368,8 @@ function buildTileTexture(level){
 let boss = {active:false,pos:[0,0,0],scale:2.0,phase:0,until:0,eyes:0,lives:9,nextShot:0,didNova:false};
 
 // ---- Мульти-списки з карти ----
-const MAX_CATS=13, MAX_SPHERES=8, MAX_DOORS=4; // менший ліміт — рідкісніші релік-шарди
-const SHARDS_LIMIT=5; // макс. шардiв на рівень
+const MAX_CATS=13, MAX_SPHERES=17, MAX_DOORS=4; // менший ліміт — рідкісніші релік-шарди
+const SHARDS_LIMIT=7; // макс. шардiв на рівень
 // NEW: turrets + orbs
 const MAX_TURRETS=6, MAX_ORBS=12;
 const TURRET_RANGE=8.0, ORB_SPEED=2.1, ORB_DMG=10;
@@ -417,6 +456,14 @@ uniform vec2 uRes;uniform float uTime;uniform vec3 uCam,uF,uR,uU;uniform float u
 uniform float uHurt, uMuzzle;
 // + холод страху
 uniform float uFear;
+// NEW: center alignment offset for even resolutions
+uniform vec2 uAimOff;
+// NEW: debug toggle for aim dot
+uniform float uAimDebug;
+// NEW: impact decals
+const int MAX_DECALS = 8;
+uniform int uDecalCount;
+uniform vec4 uDecals[MAX_DECALS]; // xyz=pos, w=bornSec
 // tile texture (walls)
 uniform sampler2D uTileTex;
 uniform ivec2 uTileSize;     // (cols, rows)
@@ -743,7 +790,8 @@ vec3 nrm(vec3 p){
     k.xxx*map(p+k.xxx*e).x);
 }
 void main(){
-  vec2 uv=(gl_FragCoord.xy-0.5*uRes)/uRes.y;
+  // shift UV by half-pixel when W/H are even so crosshair center matches ray(0,0)
+  vec2 uv=(gl_FragCoord.xy-0.5*uRes)/uRes.y - uAimOff;
   vec3 rd=normalize(uv.x*uR+uv.y*uU+uF);
   vec2 h=march(uCam,rd); float t=h.x, mat=h.y;
   vec3 bg=vec3(0.02,0.02,0.04);
@@ -942,6 +990,19 @@ void main(){
     // бекграунд fallback (не має траплятись, але на всяк випадок)
     col = vec3(0.1);
   }
+  // NEW: apply bullet scorch/spark near hit points (short TTL, small radius)
+  for(int i=0;i<MAX_DECALS;i++){
+    if(i>=uDecalCount) break;
+    float age = uTime - uDecals[i].w;
+    if(age<0.0 || age>0.65) continue;
+    float a = smoothstep(0.65, 0.0, age); // fade out
+    float d = length(p - uDecals[i].xyz);
+    float scorch = smoothstep(0.22, 0.00, d); // dark spot
+    col = mix(col, col*0.5, scorch * a * 0.8);
+    float ring = smoothstep(0.12, 0.08, abs(d - 0.10)); // warm spark ring
+    col += ring * a * vec3(1.2, 0.6, 0.2);
+  }
+
   vec3 l=normalize(vec3(0.4,0.6,0.7));
   float diff=max(0.05,dot(n,l));
   col*=diff + (mat>2.5 ? 0.3 : 0.3);
@@ -969,8 +1030,22 @@ void main(){
   colFog = mix(colFog, vec3(0.0,0.22,0.33), clamp(uFear,0.0,1.0));
   // muzzle flash bloom at screen center
   float flash = uMuzzle * smoothstep(0.6, 0.0, length(uv));
-  colFog += flash * 0.6;
+  // colFog += flash * 0.6; // old
+  colFog += flash * vec3(1.2, 0.8, 0.2); // NEW: warm, gun-like
   colFog *= 2.5; // global brighten factor
+  
+  // NEW: debug aim dot exactly at hitscan center (uv=0 after uAimOff)
+  if(uAimDebug>0.5){
+    float px = 1.0/uRes.y;
+    float r = length(uv);
+    float dot  = smoothstep(1.5*px, 0.5*px, r);                 // центр-піксель
+    float ring = smoothstep(4.0*px, 3.2*px, abs(r-3.6*px));     // тонке кільце
+    float m = max(dot, ring);
+    vec3  colD = vec3(2.0, 2.0, 0.1);                           // жовтий
+    float alpha = 0.05;                                         // прозорість ~35%
+    colFog = mix(colFog, colD, m*alpha);
+  }
+
   o=vec4(colFog,1.0);  
 }
 `;
@@ -1004,6 +1079,10 @@ const uRes=gl.getUniformLocation(pr,'uRes'),
       uMuzzle=gl.getUniformLocation(pr,'uMuzzle'),
       // додати uFear
       uFear=gl.getUniformLocation(pr,'uFear'),
+      // NEW: aim offset
+      uAimOff=gl.getUniformLocation(pr,'uAimOff'),   
+      // NEW: debug aim dot
+      uAimDebug=gl.getUniformLocation(pr,'uAimDebug'),         
       // tile texture
       uTileTex   = gl.getUniformLocation(pr,'uTileTex'),
       uTileSize  = gl.getUniformLocation(pr,'uTileSize'),
@@ -1029,7 +1108,10 @@ const uRes=gl.getUniformLocation(pr,'uRes'),
       uBossActive = gl.getUniformLocation(pr,'uBossActive'),
       uBoss       = gl.getUniformLocation(pr,'uBoss'),
       uBossEyes   = gl.getUniformLocation(pr,'uBossEyes'),
-      uBossPhase  = gl.getUniformLocation(pr,'uBossPhase');
+      uBossPhase  = gl.getUniformLocation(pr,'uBossPhase'),
+      // NEW decals uniforms
+      uDecalCount = gl.getUniformLocation(pr,'uDecalCount'),
+      uDecals     = gl.getUniformLocation(pr,'uDecals[0]');
 
 // Тільки тепер — завантажуємо рівень (всі залежні let уже оголошені)
 loadLevel(LEVELS[levelIndex]);
@@ -1038,6 +1120,9 @@ function onKey(e){if(['KeyW','KeyA','KeyS','KeyD'].includes(e.code)){keys[e.code
 document.addEventListener('keydown',onKey);document.addEventListener('keyup',onKey);
 canvas.addEventListener('mousedown',()=>{canvas.requestPointerLock?.()},{passive:true});
 document.addEventListener('pointerlockchange',()=>{},false);
+document.addEventListener('keydown',e=>{
+  if(e.code==='KeyV'){ aimDebug^=1; }
+});
 document.addEventListener('mousemove',e=>{
   if(document.pointerLockElement===canvas){yaw+=e.movementX*0.002;pitch-=e.movementY*0.002;pitch=Math.max(-1.5,Math.min(1.5,pitch));}
 });
@@ -1061,88 +1146,120 @@ canvas.addEventListener('mousedown',e=>{
       hudMsg=`RESPAWN AT LEVEL ${levelIndex+1}`; hudUntil=performance.now()+2000;
       return;
     }
+
+    // NEW: ROF gate
+    const nowShot=performance.now();
+    if(nowShot<nextShotAt) { sfx(300,0.03,0.15,'square'); return; }
+    nextShotAt=nowShot+SHOT_CD;   
+    
     // shoot
     muzzle=1.0;
-    sfx(1200,0.08,0.22,'square'); // постріл
+    // sfx(1200,0.08,0.22,'square'); // old
+    gunShot(0.30);                    // NEW aggressive shot
+    // NEW: recoil + crosshair pulse
+    pitchKick=Math.min(0.18, pitchKick+0.065);
+    xhPulse=1.0;
+
     const now=performance.now();
-    const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
-    const F=[sy*cp, sp, -cy*cp], U=[-sy*sp, cp, cy*sp], Rv=[cy,0,sy];
-    const O=pos, D=F;
-    // --- hitscan по СФЕРАХ — не приховуємо шард/хіл при пострілах ---
+    // USE RENDERED CAMERA + FORWARD (includes recoil and shake)
+    const O=lastCam;
+    {
+      const Dx = lastF[0] - aimOff[0]*lastR[0] - aimOff[1]*lastU[0];
+      const Dy = lastF[1] - aimOff[0]*lastR[1] - aimOff[1]*lastU[1];
+      const Dz = lastF[2] - aimOff[0]*lastR[2] - aimOff[1]*lastU[2];
+      const inv = 1/Math.hypot(Dx,Dy,Dz);
+      var D = [Dx*inv, Dy*inv, Dz*inv];
+    }
+
+    // NEW: знайти першу перешкоду
+    const lim = rayLimitToBlock(O,D,40);
+
+    // Знайти найближчу ціль до ліміту
+    let best={t:Infinity,type:'none', idx:-1};
+    // сфери (шарди/хіли/орби)
     for (let i=0;i<spheres.length;i++){
       const s=spheres[i]; if(s.collected) continue;
-      const C=s.pos, R=s.R;
-      const OC=[O[0]-C[0],O[1]-C[1],O[2]-C[2]];
-      const t = -(OC[0]*D[0]+OC[1]*D[1]+OC[2]*D[2]);
-      if(t>0){
-        const qx=OC[0]+t*D[0], qy=OC[1]+t*D[1], qz=OC[2]+t*D[2];
-        if(Math.hypot(qx,qy,qz)<=R+0.02){
-          // залишаємо механізм “пірнання”, але на 0 мс для shard/heal
-          if(s.type==='shard' || s.type==='heal'){ s.downUntil = now - 1; }
-          // інші типи (якщо з’являться) можуть мати свій таймаут
-        }
-      }
+      const tHit = raySphereHitT(O,D,s.pos,s.R,0.03);
+      if(tHit<=lim.t && tHit<best.t){ best={t:tHit,type:'sphere',idx:i}; }
     }
-    // --- утиліта для хітскану по сфері
-    function rayHitsSphere(O,D,C,R,slack=0.02){
-      const OC=[O[0]-C[0],O[1]-C[1],O[2]-C[2]];
-      const t = -(OC[0]*D[0]+OC[1]*D[1]+OC[2]*D[2]); // проєкція на промінь
-      if(t<=0) return false;
-      const qx=OC[0]+t*D[0], qy=OC[1]+t*D[1], qz=OC[2]+t*D[2];
-      return (qx*qx+qy*qy+qz*qz) <= (R+slack)*(R+slack);
+    // орби
+    for (let i=0;i<orbs.length;i++){
+      const b=orbs[i]; if(b.collected) continue;
+      const tHit = raySphereHitT(O,D,b.pos,b.R,0.03);
+      if(tHit<=lim.t && tHit<best.t){ best={t:tHit,type:'orb',idx:i}; }
     }
-    // --- hitscan по КОТАХ (голова + тулуб 2 сферами)
+
+    // коти (3 сфери-апрокс)
     for (let i=0;i<cats.length;i++){
       const c=cats[i];
-      // орієнтири взяті з твоєї SDF-моделі (див. sdCatModelAt)
-      const parts = [
-        // Голова
+      const parts=[
         {C:[c.pos[0]+0.60, c.pos[1]+0.16, c.pos[2]+0.17], R:0.32},
-        // Груди/плечі (біля ellipsoid vec3(0.22,-0.02,0.00))
         {C:[c.pos[0]+0.22, c.pos[1]+0.00, c.pos[2]+0.00], R:0.40},
-        // Таз/спина (біля ellipsoid vec3(-0.05,0.02,0.00))
         {C:[c.pos[0]-0.15, c.pos[1]+0.02, c.pos[2]+0.00], R:0.44},
       ];
-      let hit=false;
-      for(const p of parts){ if(rayHitsSphere(pos,D,p.C,p.R,0.03)){ hit=true; break; } }
-      if(!hit) continue;
-      if(c.mode===0){
-        c.mode=1; c.modeUntil=now + CAT_SAFE_MS + 2500;
-        c.attacking=false; c.eyes=0;
-        hudMsg='IT SPLITS — WRAITH!'; hudUntil=now+HUD_MS;
-        sfx(1800,0.10,0.25,'sawtooth');
-        fearPulse=1.0;
-      }else{
-        c.modeUntil = now + Math.max(1500, (c.modeUntil-now)+800);
-        hudMsg='WRAITH SHRIEKS'; hudUntil=now+HUD_MS;
-        sfx(260,0.12,0.25,'triangle');
-        fearPulse=1.0;
+      let tMin=Infinity;
+      for(const p of parts){ tMin=Math.min(tMin, raySphereHitT(O,D,p.C,p.R,0.03)); }
+      if(tMin<=lim.t && tMin<best.t){ best={t:tMin,type:'cat',idx:i}; }
+    }
+
+    // Застосувати ефекти для найближчого попадання або по перешкоді
+    if(best.type!=='none'){
+      const hitP=[O[0]+D[0]*best.t, O[1]+D[1]*best.t, O[2]+D[2]*best.t];
+      addDecal(hitP);
+      if(best.type==='sphere'){
+        const s=spheres[best.idx];
+        if(!s.collected){
+          if(s.type==='heal'){
+            s.downUntil = now - 1; // «пірнути» миттєво (без зникнення)
+          }else{
+            s.downUntil = now - 1;
+          }
+        }
+      }else if(best.type==='orb'){
+        const b=orbs[best.idx]; if(!b.collected){ b.collected=true; sfx(420,0.05,0.18,'triangle'); }
+      }else if(best.type==='cat'){
+        const c=cats[best.idx];
+        if(c.mode===0){
+          c.mode=1; c.modeUntil=now + CAT_SAFE_MS + 2500;
+          c.attacking=false; c.eyes=0;
+          hudMsg='IT SPLITS — WRAITH!'; hudUntil=now+HUD_MS; sfx(1800,0.10,0.25,'sawtooth'); fearPulse=1.0;
+        }else{
+          c.modeUntil = now + Math.max(1500, (c.modeUntil-now)+800);
+          hudMsg='WRAITH SHRIEKS'; hudUntil=now+HUD_MS; sfx(260,0.12,0.25,'triangle'); fearPulse=1.0;
+        }
+        // Бос — окремо (очі)
+        if(boss.active && boss.phase===3){
+          // залишаємо поточну eye-логіку нижче — вона працює через пряме попадання у сферу очей
+        }
+      }
+    } else {
+      // нічого до стіни — ставимо декаль на першу перешкоду (стіна/двері), якщо вона є
+      if(lim.type!=='none'){
+        addDecal(lim.p);
+        sfx(280,0.03,0.12,'square'); // «тупий» удар
       }
     }
-    // NEW: boss eye window — only when open
+
+    // Бос очі (залишається, але природно обмежено стінами завдяки лиміту)
     if(boss.active && boss.phase===3){
       const s=boss.scale, bp=boss.pos;
       const eyeL=[bp[0]+0.662*s, bp[1]+0.172*s, bp[2]+0.238*s];
       const eyeR=[bp[0]+0.662*s, bp[1]+0.172*s, bp[2]+0.102*s];
       const r=0.10*s;
-      if(rayHitsSphere(O,D,eyeL,r,0.02) || rayHitsSphere(O,D,eyeR,r,0.02)){
+      const tL = raySphereHitT(O,D,eyeL,r,0.02), tR = raySphereHitT(O,D,eyeR,r,0.02);
+      const tEye = Math.min(tL,tR);
+      if(tEye<=lim.t){
         boss.lives=Math.max(0,boss.lives-1);
         boss.phase=4; boss.until=now+900; boss.eyes=0; boss.didNova=false;
         hudMsg = `LIFE -1 (${boss.lives}/9)`; hudUntil=now+1200;
         sfx(460,0.2,0.28,'triangle'); fearPulse=1.0;
+        addDecal([O[0]+D[0]*tEye, O[1]+D[1]*tEye, O[2]+D[2]*tEye]);
         if(boss.lives<=0){
-          boss.active=false; 
-          gameOver=true;
-          // NEW: переможний екран (бос)
+          boss.active=false; gameOver=true;
           showEnd('bossWin','CEREMONY COMPLITE','CHERNOCOT avatar has been banished from this realm. The World signs in relief.');
           sfx(1200,0.6,0.25,'triangle');
         }
       }
-    }
-    // NEW: збиваємо орби пострілом
-    for(let i=0;i<orbs.length;i++){
-      const b=orbs[i]; if(b.collected) continue;
-      if(rayHitsSphere(O,D,b.pos,b.R,0.03)){ b.collected=true; sfx(420,0.05,0.18,'triangle'); }
     }
   }
 });
@@ -1243,6 +1360,45 @@ function resolveWallCollision(oldP,nextP){
    return tmp.slice(0, Math.min(k,tmp.length)).map(o=>o.i);
  }
 
+
+// --- утиліта: перше блокування променя (стіна тайла або ЗАЧИНЕНІ двері)
+function rayLimitToBlock(O,D,maxT=40){
+  const step=0.1; // грубо, але дешево (постріл не кожен кадр)
+  let t=0;
+  while(t<maxT){
+    t+=step;
+    const px=O[0]+D[0]*t, py=O[1]+D[1]*t, pz=O[2]+D[2]*t;
+    // тверда стіна
+    if(isSolidAt(px,pz)) return {t, type:'wall', p:[px,py,pz]};
+    // зачинені двері як блок
+    for(const d of doors){
+      if(d.open) continue;
+      if(pointInDoor([px,py,pz], d, 0.0)) return {t, type:'door', p:[px,py,pz], door:d};
+    }
+  }
+  return {t:maxT, type:'none', p:[O[0]+D[0]*maxT, O[1]+D[1]*maxT, O[2]+D[2]*maxT]};
+}
+// --- утиліта: t перетину променя і сфери (-|D|=1), або Infinity
+function raySphereHitT(O,D,C,R,slack=0.02){
+  const L=[C[0]-O[0],C[1]-O[1],C[2]-O[2]];
+  const tca = L[0]*D[0]+L[1]*D[1]+L[2]*D[2];
+  if(tca<0) return Infinity;
+  const ll = L[0]*L[0]+L[1]*L[1]+L[2]*L[2];
+  const r2=(R+slack)*(R+slack);
+  const d2=ll - tca*tca;
+  if(d2>r2) return Infinity;
+  const thc=Math.sqrt(r2-d2);
+  const t=tca-thc;
+  return t>0?t:Infinity;
+}
+// NEW: додати декаль
+function addDecal(p){
+  const bornSec = ((performance.now()-startT)/1000);
+  decals.push({pos:[p[0],p[1],p[2]], born:bornSec});
+  if(decals.length>MAX_DECALS) decals.shift();
+}
+
+
 // --- loop ---
 function vec3(x,y,z){return new Float32Array([x,y,z])}
 function frame(t){
@@ -1257,8 +1413,11 @@ function frame(t){
     frame.acc = 0; frame.count = 0;
   }
   // movement
-  const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitch), sp=Math.sin(pitch);
+  // NEW: apply recoil kick to render pitch
+  const pitchR = pitch + pitchKick;
+  const cy=Math.cos(yaw), sy=Math.sin(yaw), cp=Math.cos(pitchR), sp=Math.sin(pitchR);
   const F=[sy*cp, sp, -cy*cp], U=[-sy*sp, cp, cy*sp], Rv=[cy,0,sy];
+
   const speed=3.0*dt*(gameOver?0:1);
   // попередній розрахунок нової позиції
   let next=[pos[0],pos[1],pos[2]];
@@ -1346,7 +1505,7 @@ function frame(t){
       const dx=pos[0]-c.pos[0], dy=pos[1]-c.pos[1], dz=pos[2]-c.pos[2];
       const dist=Math.hypot(dx,dy,dz);
       if(isWraith){
-        // Білий: орбіта + епізодичний блиنك за спину
+        // Білий: орбіта + епізодичний блинок за спину
         c.attacking=false; c.eyes=0;
         c.theta += dt*0.8;
         const tx=pos[0]+Math.sin(c.theta)*WRAITH_ORBIT_R;
@@ -1418,10 +1577,14 @@ function frame(t){
       }
     }
   }
-// FX decay
+  // FX decay
   hurtPulse *= Math.exp(-dt*3.5);
   muzzle *= Math.exp(-dt*25.0);
   fearPulse *= Math.exp(-dt*2.2);
+  // NEW: recoil + xhair decay
+  pitchKick *= Math.exp(-dt*12.0);
+  xhPulse *= Math.exp(-dt*8.0);
+
   // NEW: Boss behavior
   if(boss.active && !gameOver){
     const now=performance.now();
@@ -1527,11 +1690,17 @@ function frame(t){
       }
     }
   }
-// HUD оновлення
+  // HUD оновлення
   const base=(now<hudUntil)?hudMsg:'';
-  // display integer HP, keep internal fractional HP
   const hudNew = `${base}   SHARDS:${shardCount}   HP:${hp|0}`;
   if(hud._prev !== hudNew){ hud.textContent = hudNew; hud._prev = hudNew; }
+
+  // NEW: crosshair pulse
+  if(xh){
+    const s = Math.max(0,Math.min(1,xhPulse));
+    xh.style.transform = `translate(-50%,-50%) scale(${(1+0.35*s).toFixed(2)})`;
+    xh.style.opacity = (0.6 + 0.4*s).toFixed(2);
+  }
 
   // NEW: оновлення підказки на екрані кінцівки (зворотний відлік)
   if(endState!=='none'){
@@ -1541,10 +1710,35 @@ function frame(t){
       : `Click to restart.`;
   }
 
+  // NEW: purge old decals
+  const nowSec = (t - startT)/1000;
+  decals = decals.filter(d => (nowSec - d.born) < (DECAL_TTL/1000));
+
   // uniforms & draw
   gl.uniform2f(uRes,W,H);
   gl.uniform1f(uTime,(t-startT)/1000);
-  gl.uniform3fv(uCam,vec3(pos[0],pos[1],pos[2]));
+
+  // NEW: set aim offset for even W/H to kill right/down drift
+  const aimX = (W & 1) ? 0 : 0.5 / H;
+  const aimY = (H & 1) ? 0 : 0.5 / H;
+  gl.uniform2f(uAimOff, aimX, aimY);
+  // keep a CPU copy for hitscan
+  aimOff[0]=aimX; aimOff[1]=aimY;
+
+  // NEW: tiny camera shake (render-only)
+  const sh = muzzle*0.05 + hurtPulse*0.04;
+  const shx = (Math.random()*2-1)*sh, shy = (Math.random()*2-1)*sh; // was: sx, sy (conflicted with sin(yaw))
+  const camX = pos[0] + Rv[0]*shx + U[0]*shy;
+  const camY = pos[1] + Rv[1]*shx + U[1]*shy;
+  const camZ = pos[2] + Rv[2]*shx + U[2]*shy;
+
+  // NEW: store rendered camera + basis for hitscan alignment
+  lastCam[0]=camX; lastCam[1]=camY; lastCam[2]=camZ;
+  lastF[0]=F[0];   lastF[1]=F[1];   lastF[2]=F[2];
+  lastU[0]=U[0];   lastU[1]=U[1];   lastU[2]=U[2];
+  lastR[0]=Rv[0];  lastR[1]=Rv[1];  lastR[2]=Rv[2];  
+
+  gl.uniform3fv(uCam,vec3(camX,camY,camZ));
   gl.uniform3fv(uF,vec3(F[0],F[1],F[2]));
   gl.uniform3fv(uR,vec3(Rv[0],Rv[1],Rv[2]));
   gl.uniform3fv(uU,vec3(U[0],U[1],U[2]));
@@ -1552,6 +1746,9 @@ function frame(t){
   gl.uniform1f(uHurt, hurtPulse);
   gl.uniform1f(uMuzzle, muzzle);
   gl.uniform1f(uFear, fearPulse);
+  // NEW: push aim debug toggle
+  gl.uniform1f(uAimDebug, aimDebug?1:0);
+
 // --- push cats ---
   {
     const CAT_GPU_MAX = 6; // шлемо тільки найближчих 6
@@ -1623,7 +1820,20 @@ function frame(t){
     gl.uniform1i(uTurretCount, n);
     gl.uniform4fv(uTurretsPos, posArr);
   }
-    // NEW: push boss
+  // NEW: push decals
+  {
+    const n=Math.min(decals.length|0, MAX_DECALS);
+    const arr=new Float32Array(MAX_DECALS*4);
+    for(let i=0;i<n;i++){
+      arr[i*4+0]=decals[i].pos[0];
+      arr[i*4+1]=decals[i].pos[1];
+      arr[i*4+2]=decals[i].pos[2];
+      arr[i*4+3]=decals[i].born; // seconds since start
+    }
+    gl.uniform1i(uDecalCount, n);
+    gl.uniform4fv(uDecals, arr);
+  }
+  // NEW: push boss
   gl.uniform1i(uBossActive, boss.active?1:0);
   gl.uniform4f(uBoss, boss.pos[0], boss.pos[1], boss.pos[2], boss.scale);
   gl.uniform1f(uBossEyes, boss.eyes);
