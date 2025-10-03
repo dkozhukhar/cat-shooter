@@ -1,4 +1,4 @@
-**Cat Shooter: Ritual Catacombs**
+**Cat Shooter: Ritual Catacombs — JS13K 2025 Version**
 
 A tiny 3D horror-shooter in cursed catacombs.
 Collect glowing shards, open runic doors, survive the ritual of nine lives.
