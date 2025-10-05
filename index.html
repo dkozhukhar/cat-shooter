@@ -1,5 +1,5 @@
 <!-- ready for terser+roadroller -->
-<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs — Director's Cut Version 03.10.2025</title>
+<!doctype html><meta charset=utf-8><title>Cat Shooter Ritual Catacombs — Director's Cut Version 05.10.2025</title>
 <style>html,body{margin:0;height:100%;overflow:hidden;background:#000}canvas{display:block;width:100vw;height:100vh; image-rendering: pixelated;}</style>
 <canvas id=c></canvas>
 <!-- crosshair -->
@@ -380,9 +380,9 @@ const LEVELS=[
   [
     "ooooooooooooooooooooooooo",
     "o***********************o",
-    "oooo***ok**o*k*o***oooooo",
-    "oE***k***ok**o********po",
-    "oooo***ok**ok**o***oooooo",
+    "oooo***o**o**ko***oooooo",
+    "oE***k***ko**********po",
+    "oooo***o**o**ko***oooooo",
     "o***********************o",
     "ooooooooooooooooooooooooo"
   ],
@@ -668,6 +668,17 @@ function loadLevel(levelRows){
   minDoorReq = doors.length? Math.min(...doors.map(d=>d.req)) : 0;
   // старт гравця
   if(LV.playerStart){ pos=[LV.playerStart[0],0,LV.playerStart[2]]; }
+
+  // NEW: initial facing — 90° left on Level 1 (default forward -Z → left is -X)
+  if(levelIndex===0){
+    yaw = -Math.PI/2;
+    // Optional: face the nearest door exactly (uncomment to use precise aim)
+    // if(doors.length){
+    //   const d=doors[0], dx=d.pos[0]-pos[0], dz=d.pos[2]-pos[2];
+    //   yaw = Math.atan2(dx, -dz); // matches F=[sin(yaw),*, -cos(yaw)]
+    // }
+  }
+
   // NEW: boss init if anchor exists
   if(LV.bossPos){
     const now=performance.now();
@@ -979,8 +990,12 @@ vec2 map(vec3 p){
     if(i>=uCatCount) break;
     if(uCatsState[i] < 0.5) continue; // hidden
     vec3 cp = uCatsPos[i].xyz;
-    float dc = sdCatModelAt(p, cp);
-    if(dc < d){ d=dc; m=packCatId(i); }
+    // NEW: cheap bounding-sphere test to avoid full SDF most of the time
+    float cb = sdSphere(p - cp, 0.80);
+    if(cb < d){
+      float dc = sdCatModelAt(p, cp);
+      if(dc < d){ d=dc; m=packCatId(i); }
+    }
   }
   // двері (мат 5.xx) — світний тонкий бокс
   for(int i=0;i<MAX_DOORS;i++){
@@ -1021,7 +1036,7 @@ vec2 march(vec3 ro,vec3 rd){
     // межа сцени
     if (t > 40.0) { m = 0.0; break; }
     // трохи густіший туман для раннього виходу
-    if (exp(-0.09 * t) < 0.02) { m = 0.0; break; }
+    if (exp(-0.09 * t) < 0.03) { m = 0.0; break; }
   }
   return vec2(t, m);
 }
@@ -1065,19 +1080,80 @@ void main(){
 
 
   if(mat < 1.5){
-    // WALLS — спокійний холодний камінь; руни — ледь видні, без пульсу
-    col = mix(vec3(0.09,0.10,0.11), vec3(0.12,0.13,0.14),
-              0.5 + 0.5*sin((p.x*1.7+p.z*1.3)*0.4)); // низька амплітуда
-    // plane uv
+    // WALLS — patchy limestone: macro “cells”, broken segments, and smooth tint drift
+    // Per-tile hash + macro-cell id for variety clusters
+    float rTile = hash21(vec2(ix,iz)*1.23);
+    ivec2 blk = ivec2(ix/2, iz/2);              // 2×2 tile macro-cell → "клітинка"
+    float hBlk = hash21(vec2(blk));
+
+    // plane uv for current wall face
     float u = (abs(n.x) > abs(n.z)) ? fract(-p.z/uTileScale + uTileCenter.y)
                                     : fract( p.x/uTileScale + uTileCenter.x);
     float v = clamp((p.y+0.6)/1.2,0.0,1.0);
     vec2 wuv=vec2(u,v);
-    // рідкі руни — спокійний ціан, без часу
-    float r = hash21(vec2(ix,iz)*1.23);
-    if(r < 0.16){
+
+    // Smooth global color drift (old stone → yellowish → whiter) across space
+    float tA = 0.5 + 0.5*sin(p.x*0.14 + p.z*0.10 + rTile*4.0);
+    float tB = 0.5 + 0.5*sin(p.x*0.06 - p.z*0.11 + rTile*2.3);
+    float tone = clamp(0.5*tA + 0.5*tB, 0.0, 1.0);
+    vec3 cGrey   = vec3(0.12,0.13,0.14);
+    vec3 cOchre  = vec3(0.17,0.16,0.13);
+    vec3 cWhite  = vec3(0.19,0.19,0.20);
+    vec3 base = mix(cGrey,  cOchre, smoothstep(0.20,0.80,tone));
+         base = mix(base,   cWhite, smoothstep(0.65,0.95,tone));
+
+    // 1) “Carved” style: seams + saw grooves + mild pores
+    float seamX = smoothstep(0.035, 0.0, abs(fract(wuv.x*(2.0+floor(rTile*2.0)) + rTile*0.30)-0.5));
+    float seamY = smoothstep(0.035, 0.0, abs(fract(wuv.y*(3.0+floor(rTile*3.0)) + rTile*0.70)-0.5));
+    float seams = clamp(max(seamX, seamY), 0.0, 1.0);
+
+    float ang = rTile*6.2831853;
+    vec2  dir = vec2(cos(ang), sin(ang));
+    float saw = abs(sin(dot(p.xz, dir)*8.0 + rTile*3.0));
+    float grooves = smoothstep(0.92, 0.995, saw);
+    float grooveMask = mix(1.0, 1.6, smoothstep(0.05, 0.55, wuv.y));
+
+    vec2 gp = floor(p.xz*4.0);
+    vec2 f  = fract(p.xz*4.0);
+    vec2 cc = vec2(hash21(gp+13.1), hash21(gp+7.7));
+    float pitD = length(f-cc);
+    float pits = smoothstep(0.22, 0.12, pitD) * (0.6 + 0.4*hash21(gp+7.7));
+
+    vec3 cCarved = base;
+    cCarved = mix(cCarved, cCarved*0.70, seams*0.85);
+    cCarved -= grooves * grooveMask * 0.030;
+    cCarved -= pits * 0.08;
+
+    // 2) “Plain” style: almost no tooling, just subtle grain
+    float grain = 0.5 + 0.5*(sin(p.x*3.0 + rTile*5.0)*0.6 + sin(p.z*4.0 + rTile*3.0)*0.4);
+    vec3 cPlain = base * (0.98 + 0.02*grain);
+
+    // 3) “Broken” style: cracks + deeper pores, no seams/grooves
+    float crackW = abs(sin((wuv.x*24.0 + sin(wuv.y*9.0 + rTile*6.0))));
+    float crack  = smoothstep(0.06, 0.03, crackW);
+    vec2 gp2 = floor(p.xz*7.0);
+    vec2 f2  = fract(p.xz*7.0);
+    vec2 cc2 = vec2(hash21(gp2+2.1), hash21(gp2+5.7));
+    float pit2 = smoothstep(0.28, 0.12, length(f2-cc2)) * (0.6 + 0.4*hash21(gp2+9.9));
+    vec3 cBroken = base;
+    cBroken -= pit2 * 0.14;
+    cBroken -= crack * 0.10;
+
+    // Style weights per macro-cell: some plain runs, some broken, rest carved
+    float wPlain  = step(0.82, hBlk);                            // ~18% plain patches
+    float wBroken = smoothstep(0.58, 0.82, hBlk) * (1.0-wPlain); // ~24% broken patches
+    float wCarved = 1.0 - wPlain - wBroken;
+
+    // Compose by weights (branchless)
+    col = cCarved*wCarved + cPlain*wPlain + cBroken*wBroken;
+
+    // Warm dust near floor
+    col += vec3(0.01,0.008,0.004) * smoothstep(0.0, 0.55, wuv.y);
+
+    // Rare cyan rune overlay (subtle)
+    if(rTile < 0.16){
       float m = catRune(wuv);
-      col = mix(col, col + vec3(0.00,0.08,0.12), m*0.28);
+      col = mix(col, col + vec3(0.00,0.08,0.12), m*0.24);
     }
   } else if(mat < 3.0){
     // сфери: зелений (шард) або ціан (хіл) або червоно-пурпурний (орб)
@@ -2026,7 +2102,7 @@ function frame(t){
 
 // --- push cats ---
   {
-    const CAT_GPU_MAX = 6; // шлемо тільки найближчих 6
+    const CAT_GPU_MAX = 4; // was 6 — cut GPU cat budget
     const pick = pickNearest(cats, CAT_GPU_MAX, c=>c.pos);
     const catCount = pick.length|0;
     const posArr = new Float32Array(MAX_CATS*4);
@@ -2037,7 +2113,6 @@ function frame(t){
       const i = pick[j];
       const c=cats[i];
       posArr[j*4+0]=c.pos[0]; posArr[j*4+1]=c.pos[1]; posArr[j*4+2]=c.pos[2];
-      // 1=black, 2=white
       stateArr[j]=(c.mode===1 && now<c.modeUntil)?2.0:1.0;
       eyesArr[j]=c.eyes;
     }
@@ -2048,7 +2123,7 @@ function frame(t){
   }
   // --- push spheres ---
   {
-    const SPH_GPU_MAX = 6;
+    const SPH_GPU_MAX = 4; // was 6 — lighter
     const balls = spheres.concat(orbs.filter(o=>!o.collected));
     const pick = pickNearest(balls, SPH_GPU_MAX, s=>s.pos);
     const n = pick.length|0;
